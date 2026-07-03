@@ -1,24 +1,3 @@
-//
-//  ContentView.swift
-//  trackpad_control
-//
-//  Created by Jos on 15/4/26.
-//
+// This file is intentionally empty.
+// All UI is in Views/ and the app uses MenuBarExtra + Settings scenes.
 
-import SwiftUI
-
-struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
-    }
-}
-
-#Preview {
-    ContentView()
-}

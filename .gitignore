@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+
+# Xcode build artifacts
+build/
+build-*/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# Profiling / coverage
+*.profraw
+*.profdata
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
