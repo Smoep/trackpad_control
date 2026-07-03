@@ -1,2 +1,16 @@
-# trackpad_control
-Tesdt
+# Trackpad Control
+
+Trackpad Control is a macOS menu bar app that turns custom multi-finger trackpad gestures into actions like app launch, keyboard shortcuts, and window management.
+
+It is built for power users who want gesture automation on Mac without opening full automation tools.
+
+## What It Does
+
+- Records one to five finger gestures on the Mac trackpad
+- Matches gestures with a shape-based recognizer tuned for noisy real-world input
+- Triggers actions: launch apps, run shortcuts, execute continuous actions, and control windows
+- Runs from the menu bar with configurable settings and optional overlay diagnostics
+
+## Keywords
+
+macOS, trackpad gestures, gesture recognition, gesture automation, menu bar app, window management, productivity, SwiftUI, multitouch
