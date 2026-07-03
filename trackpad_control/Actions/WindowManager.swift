@@ -174,6 +174,18 @@ enum WindowManager {
             }
             pendingInternalSpaceDelta = 0
         }
+
+        // Diagnostic: log frontmost-app activations so we can correlate the
+        // "overlay fails when I hover/switch to a new application" symptom with
+        // the anchor-activation timeline in the same log file.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            mtdLog("[MTD] didActivateApplication app=\(app?.localizedName ?? "?") pid=\(app?.processIdentifier ?? -1) idx=\(currentSpaceIdx)")
+        }
     }
 
     // Sticky target: remember last targeted app so consecutive window actions

@@ -297,6 +297,9 @@ final class TouchCaptureManager {
     func start() {
         guard !isActive, fnCreateList != nil else { return }
         ztLog("TCM-START: launching capture")
+        let rs = AppState.shared.recognitionSettings
+        let layers = (1...5).map { rs.layerKey(for: $0).rawValue }.joined(separator: ",")
+        ztLog("TCM-CONFIG: anchorDelay=\(String(format: "%.2f", rs.anchorActivationDelay)) moveThreshold=\(String(format: "%.3f", anchorMovementThreshold)) layers=[\(layers)] anchorZones=\(rs.anchorAllowedZones.count)/81 discreteConf=\(String(format: "%.2f", rs.discreteConfidence))")
 
         let cfList = fnCreateList!().takeUnretainedValue()
         let count = CFArrayGetCount(cfList)
@@ -1462,7 +1465,13 @@ final class TouchCaptureManager {
         }
 
         guard anchorPathIndex == nil, activeTouches.count == 1, completedPaths.isEmpty else { return }
+        beginAnchorCandidate(pathIndex: pathIndex, point: point)
+    }
 
+    /// Creates the anchor candidate for a single resting finger: zone-filters the
+    /// start point, then arms the activation and visual-indicator timers. Shared
+    /// by the touch-down path and the deferred (post-cooldown) re-evaluation path.
+    private func beginAnchorCandidate(pathIndex: Int32, point: PathPoint) {
         // Zone filter: if the user has restricted which zones can start an anchor,
         // map the touch's start position to a 9×9 grid cell index and bail if blocked.
         // Cell index = row * 9 + col; row 0 = top (y≈1), row 8 = bottom (y≈0).
@@ -1501,6 +1510,32 @@ final class TouchCaptureManager {
         ztLog("ANCHOR-ACTIVATION: candidate path=\(pathIndex) delay=\(String(format: "%.2f", delay))")
     }
 
+    /// Re-evaluates anchor candidacy for a finger that is still resting. The
+    /// touch-down handler only checks the post-gesture cooldown once, at landing;
+    /// a finger that lands within the cooldown is skipped and never reconsidered,
+    /// so a deliberate still hold produces no candidate. This runs per frame and
+    /// starts the candidate once the cooldown has elapsed, provided the finger is
+    /// alone and has not moved past the anchor threshold (a transition/drag finger
+    /// would exceed it and is correctly ignored).
+    private func maybeStartDeferredAnchorCandidate() {
+        guard hasAnchorActivationLayer, !AppState.shared.isShowingEditor else { return }
+        if physicalClickTaintedGesture { return }
+        guard anchorPathIndex == nil, !anchorActivationActive else { return }
+        guard activeTouches.count == 1, completedPaths.isEmpty else { return }
+        let elapsed = ProcessInfo.processInfo.systemUptime - lastInteractionEndTime
+        guard elapsed >= AppState.shared.recognitionSettings.anchorActivationDelay else { return }
+        guard let (pid, path) = activeTouches.first, let last = path.last else { return }
+        // Ignore a finger that has been travelling — only a genuinely resting
+        // finger should be promoted. Origin is the finger's current position so
+        // the movement gate applies from here forward.
+        let origin = path.first ?? last
+        let dx = last.x - origin.x
+        let dy = last.y - origin.y
+        guard sqrt(dx * dx + dy * dy) <= anchorMovementThreshold else { return }
+        ztLog("ANCHOR-ACTIVATION: DEFERRED-START path=\(pid) (cooldown elapsed)")
+        beginAnchorCandidate(pathIndex: pid, point: last)
+    }
+
     private func updateAnchorCandidateIndicator(pathIndex: Int32, startedAt: TimeInterval, delay: TimeInterval) {
         guard !physicalClickTaintedGesture,
               !anchorActivationActive,
@@ -1525,14 +1560,18 @@ final class TouchCaptureManager {
     private func anchorCandidateReadyForGestureFingers() -> Bool {
         guard anchorPathIndex != nil, anchorCandidateDelay > 0 else { return false }
         let elapsed = ProcessInfo.processInfo.systemUptime - anchorCandidateStartedAt
-        let visibleStart = max(0.22, anchorCandidateDelay * 0.75)
+        // Promote candidate earlier for tap-driven anchor flows so a quick
+        // one-finger touch can become the anchor before the full hold delay.
+        let visibleStart = max(0.06, anchorCandidateDelay * 0.25)
         return elapsed >= visibleStart
     }
 
     private func updateAnchorActivationState() {
+        if anchorPathIndex == nil { maybeStartDeferredAnchorCandidate() }
         guard let anchorPathIndex else { return }
         guard let anchorPath = activeTouches[anchorPathIndex] else {
-            ztLog("ANCHOR-ACTIVATION: CANCEL reason=\(anchorActivationActive ? "anchorLifted" : "candidateLifted")")
+            let heldFor = ProcessInfo.processInfo.systemUptime - anchorCandidateStartedAt
+            ztLog("ANCHOR-ACTIVATION: CANCEL reason=\(anchorActivationActive ? "anchorLifted" : "candidateLifted") heldFor=\(String(format: "%.3f", heldFor)) needed=\(String(format: "%.2f", anchorCandidateDelay))")
             if anchorActivationActive {
                 resetGesture()
             } else {
@@ -1542,7 +1581,8 @@ final class TouchCaptureManager {
         }
         if anchorActivationActive { return }
         guard !anchorMovedTooFar(anchorPath, threshold: anchorMovementThreshold) else {
-            ztLog("ANCHOR-ACTIVATION: CANCEL reason=\(anchorActivationActive ? "anchorMovedActive" : "anchorMovedBeforeActive")")
+            let dist = anchorMovedDistance(anchorPath)
+            ztLog("ANCHOR-ACTIVATION: CANCEL reason=\(anchorActivationActive ? "anchorMovedActive" : "anchorMovedBeforeActive") dist=\(String(format: "%.3f", dist)) threshold=\(String(format: "%.3f", anchorMovementThreshold))")
             resetAnchorActivation(reason: "anchorMovedBeforeActive")
             return
         }
@@ -1625,6 +1665,15 @@ final class TouchCaptureManager {
         let dx = last.x - start.x
         let dy = last.y - start.y
         return sqrt(dx * dx + dy * dy) > (threshold ?? anchorMovementThreshold)
+    }
+
+    /// Straight-line distance the anchor finger has moved from its origin. Used
+    /// for diagnostic logging when a candidate is cancelled for movement.
+    private func anchorMovedDistance(_ path: [PathPoint]) -> Double {
+        guard let start = anchorStartPoint, let last = path.last else { return 0 }
+        let dx = last.x - start.x
+        let dy = last.y - start.y
+        return sqrt(dx * dx + dy * dy)
     }
 
     private func resetAnchorActivation(reason: String) {
