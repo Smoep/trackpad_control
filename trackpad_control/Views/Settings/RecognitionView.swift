@@ -178,6 +178,15 @@ struct RecognitionView: View {
                     displayValue: { String(format: "%.0f ms", $0 * 1000) }
                 )
 
+                SettingsSlider(
+                    label: "Anchor Movement Tolerance",
+                    value: $appState.recognitionSettings.anchorHoldTolerance,
+                    range: 0.02...0.20,
+                    step: 0.005,
+                    help: "How far the anchor finger may drift before the anchor cancels. Small natural wiggles stay within this; a deliberate slide cancels it and returns to normal usage.",
+                    displayValue: { String(format: "%.0f mm", $0 * 100) }
+                )
+
                 HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Anchor Zones")

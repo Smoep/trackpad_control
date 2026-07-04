@@ -10,6 +10,7 @@ final class GestureOverlayWindow {
     private var window: NSWindow?
     private let overlayView = GlassOverlayView()
     private var isShowing = false
+    private var isHiding = false
     private var hideAnimationTimer: DispatchWorkItem?
     private var lastDecisionLogTime: TimeInterval = 0
     private var lastShowTime: TimeInterval = 0
@@ -31,6 +32,7 @@ final class GestureOverlayWindow {
 
         let wasHidden = !isShowing
         isShowing = true
+        isHiding = false
         lastShowTime = ProcessInfo.processInfo.systemUptime
         overlayView.mode = .anchorCandidate
         overlayView.anchorCandidateProgress = min(max(progress, 0), 1)
@@ -52,6 +54,7 @@ final class GestureOverlayWindow {
 
         let wasHidden = !isShowing
         isShowing = true
+        isHiding = false
         lastShowTime = ProcessInfo.processInfo.systemUptime
         overlayView.mode = .liveTrace
         overlayView.paths = paths
@@ -81,6 +84,12 @@ final class GestureOverlayWindow {
             return
         }
 
+        // A fade-out is already running — don't restart it. Overlapping cancel
+        // calls (the anchor teardown fires hideTrace several times in one frame)
+        // would otherwise remove the in-flight animation and blink the overlay
+        // off instead of fading.
+        if isHiding { return }
+
         if overlayView.mode == .liveTrace {
             let elapsed = ProcessInfo.processInfo.systemUptime - lastShowTime
             if elapsed < minimumTraceVisibleDuration {
@@ -97,10 +106,12 @@ final class GestureOverlayWindow {
         }
 
         logDecision("HIDE showState=true desktopIdx=\(WindowManager.currentSpaceIdx)", force: true)
+        isHiding = true
         // Scale-down exit animation (Core Animation, GPU-composited)
         overlayView.playDisappear { [weak self] in
             guard let self else { return }
             self.isShowing = false
+            self.isHiding = false
             self.overlayView.paths = []
             self.overlayView.fingerCount = 0
             self.overlayView.mode = .idle
@@ -278,8 +289,8 @@ private final class GlassOverlayView: NSView {
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = current
         fade.toValue = 0.0
-        fade.duration = 0.22
-        fade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        fade.duration = 0.30
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         layer.add(fade, forKey: "fade")
 
         CATransaction.commit()
@@ -329,9 +340,10 @@ private final class GlassOverlayView: NSView {
         NSGraphicsContext.saveGraphicsState()
 
         // Emerge: grow from a small footprint up to full size about the screen center
-        // (content-space transform — centered, so the overlay never drifts). The fill
-        // ramps in quadratically so brief mis-activations stay faint and unobtrusive.
-        let fade = p * p
+        // (content-space transform — centered, so the overlay never drifts). Alpha
+        // follows the smoothstep emergence directly for an even, smooth fade-in;
+        // at p = 1 it reaches full opacity for a seamless handoff to the live trace.
+        let fade = p
         let scale = 0.45 + 0.55 * p
         let cx = bounds.midX, cy = bounds.midY
         let t = NSAffineTransform()

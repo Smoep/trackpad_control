@@ -229,17 +229,16 @@ final class TouchCaptureManager {
     // satisfies RecognitionSettings.LayerActivation.anchor and is excluded from
     // recognition finger counts/paths while active.
     private var anchorPathIndex: Int32?
-    private var anchorStartPoint: PathPoint?
     private var anchorActivationTimer: DispatchWorkItem?
     private var anchorCandidateIndicatorTimer: DispatchWorkItem?
     private var anchorCandidateStartedAt: TimeInterval = 0
     private var anchorCandidateDelay: TimeInterval = 0
     private var anchorActivationActive = false
-    private let anchorMovementThreshold: Double = 0.06
-    // Cooldown: timestamp of the last completed gesture interaction (discard or
-    // finalize). Used to suppress anchor candidates during rapid strokes — a
-    // "transition" finger that rests briefly between strokes won't trip the anchor.
-    private var lastInteractionEndTime: TimeInterval = 0
+    // Position where the anchor finger first landed. The finger may drift within
+    // `recognitionSettings.anchorHoldTolerance` of this point (small natural
+    // wiggle) while counting down and while active; exceeding it cancels the
+    // anchor and returns to normal usage.
+    private var anchorStartPoint: PathPoint?
 
     /// Update the thread-safe flags after any state change.
     private func updateCaptureFlags() {
@@ -299,7 +298,7 @@ final class TouchCaptureManager {
         ztLog("TCM-START: launching capture")
         let rs = AppState.shared.recognitionSettings
         let layers = (1...5).map { rs.layerKey(for: $0).rawValue }.joined(separator: ",")
-        ztLog("TCM-CONFIG: anchorDelay=\(String(format: "%.2f", rs.anchorActivationDelay)) moveThreshold=\(String(format: "%.3f", anchorMovementThreshold)) layers=[\(layers)] anchorZones=\(rs.anchorAllowedZones.count)/81 discreteConf=\(String(format: "%.2f", rs.discreteConfidence))")
+        ztLog("TCM-CONFIG: anchorDelay=\(String(format: "%.2f", rs.anchorActivationDelay)) holdTolerance=\(String(format: "%.3f", rs.anchorHoldTolerance)) layers=[\(layers)] anchorZones=\(rs.anchorAllowedZones.count)/81 discreteConf=\(String(format: "%.2f", rs.discreteConfidence))")
 
         let cfList = fnCreateList!().takeUnretainedValue()
         let count = CFArrayGetCount(cfList)
@@ -1438,19 +1437,6 @@ final class TouchCaptureManager {
     private func handleAnchorActivationTouchBegan(pathIndex: Int32, point: PathPoint) {
         guard hasAnchorActivationLayer, !AppState.shared.isShowingEditor else { return }
         if physicalClickTaintedGesture { return }
-
-        // Post-gesture cooldown: don't start the anchor candidate immediately after
-        // a gesture ended. This prevents a "transition" finger that briefly rests
-        // between strokes from tripping the anchor. The cooldown equals the anchor
-        // activation delay itself — so only a deliberate pause (longer than the delay)
-        // will reach the anchor candidate phase.
-        let elapsed = ProcessInfo.processInfo.systemUptime - lastInteractionEndTime
-        let cooldown = AppState.shared.recognitionSettings.anchorActivationDelay
-        guard elapsed >= cooldown else {
-            ztLog("ANCHOR-ACTIVATION: SKIP cooldown elapsed=\(String(format: "%.3f", elapsed)) < \(String(format: "%.2f", cooldown))")
-            return
-        }
-
         if anchorActivationActive { return }
 
         if let anchorPathIndex, anchorPathIndex != pathIndex {
@@ -1497,9 +1483,10 @@ final class TouchCaptureManager {
         let candidateStartedAt = ProcessInfo.processInfo.systemUptime
         anchorCandidateStartedAt = candidateStartedAt
         anchorCandidateDelay = delay
-        // Visual indicator starts earlier than the functional gate so the
-        // "emerging" bloom has enough on-screen time to be perceptible.
-        let indicatorDelay = max(0.12, delay * 0.4)
+        // Visual indicator fires at 75% of the hold duration (min 0.20 s).
+        // Starting this close to activation means transient pauses (scrubbing, etc.)
+        // never show the bloom — only holds that are genuinely near-activation do.
+        let indicatorDelay = max(delay * 0.75, 0.20)
         let indicatorWork = DispatchWorkItem { [weak self] in
             self?.updateAnchorCandidateIndicator(pathIndex: pathIndex, startedAt: candidateStartedAt, delay: delay)
         }
@@ -1510,41 +1497,15 @@ final class TouchCaptureManager {
         ztLog("ANCHOR-ACTIVATION: candidate path=\(pathIndex) delay=\(String(format: "%.2f", delay))")
     }
 
-    /// Re-evaluates anchor candidacy for a finger that is still resting. The
-    /// touch-down handler only checks the post-gesture cooldown once, at landing;
-    /// a finger that lands within the cooldown is skipped and never reconsidered,
-    /// so a deliberate still hold produces no candidate. This runs per frame and
-    /// starts the candidate once the cooldown has elapsed, provided the finger is
-    /// alone and has not moved past the anchor threshold (a transition/drag finger
-    /// would exceed it and is correctly ignored).
-    private func maybeStartDeferredAnchorCandidate() {
-        guard hasAnchorActivationLayer, !AppState.shared.isShowingEditor else { return }
-        if physicalClickTaintedGesture { return }
-        guard anchorPathIndex == nil, !anchorActivationActive else { return }
-        guard activeTouches.count == 1, completedPaths.isEmpty else { return }
-        let elapsed = ProcessInfo.processInfo.systemUptime - lastInteractionEndTime
-        guard elapsed >= AppState.shared.recognitionSettings.anchorActivationDelay else { return }
-        guard let (pid, path) = activeTouches.first, let last = path.last else { return }
-        // Ignore a finger that has been travelling — only a genuinely resting
-        // finger should be promoted. Origin is the finger's current position so
-        // the movement gate applies from here forward.
-        let origin = path.first ?? last
-        let dx = last.x - origin.x
-        let dy = last.y - origin.y
-        guard sqrt(dx * dx + dy * dy) <= anchorMovementThreshold else { return }
-        ztLog("ANCHOR-ACTIVATION: DEFERRED-START path=\(pid) (cooldown elapsed)")
-        beginAnchorCandidate(pathIndex: pid, point: last)
-    }
-
     private func updateAnchorCandidateIndicator(pathIndex: Int32, startedAt: TimeInterval, delay: TimeInterval) {
         guard !physicalClickTaintedGesture,
               !anchorActivationActive,
               anchorPathIndex == pathIndex,
               let anchorPath = activeTouches[pathIndex],
-              !anchorMovedTooFar(anchorPath, threshold: anchorMovementThreshold) else { return }
+              !anchorMovedBeyondTolerance(anchorPath) else { return }
 
         let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
-        let visibleStart = max(0.12, delay * 0.4)
+        let visibleStart = max(delay * 0.75, 0.20)
         let visibleDuration = max(delay - visibleStart, 0.01)
         let progress = min(max((elapsed - visibleStart) / visibleDuration, 0), 1)
         GestureOverlayWindow.shared.showAnchorCandidate(progress: progress)
@@ -1554,7 +1515,7 @@ final class TouchCaptureManager {
             self?.updateAnchorCandidateIndicator(pathIndex: pathIndex, startedAt: startedAt, delay: delay)
         }
         anchorCandidateIndicatorTimer = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0, execute: work)
     }
 
     private func anchorCandidateReadyForGestureFingers() -> Bool {
@@ -1567,7 +1528,6 @@ final class TouchCaptureManager {
     }
 
     private func updateAnchorActivationState() {
-        if anchorPathIndex == nil { maybeStartDeferredAnchorCandidate() }
         guard let anchorPathIndex else { return }
         guard let anchorPath = activeTouches[anchorPathIndex] else {
             let heldFor = ProcessInfo.processInfo.systemUptime - anchorCandidateStartedAt
@@ -1579,12 +1539,19 @@ final class TouchCaptureManager {
             }
             return
         }
-        if anchorActivationActive { return }
-        guard !anchorMovedTooFar(anchorPath, threshold: anchorMovementThreshold) else {
-            let dist = anchorMovedDistance(anchorPath)
-            ztLog("ANCHOR-ACTIVATION: CANCEL reason=\(anchorActivationActive ? "anchorMovedActive" : "anchorMovedBeforeActive") dist=\(String(format: "%.3f", dist)) threshold=\(String(format: "%.3f", anchorMovementThreshold))")
+        // A finger counting down toward anchor must stay close to where it landed;
+        // once active it may wander further. Drifting beyond the phase tolerance
+        // cancels — this is what rejects slow drags (they leave the tight countdown
+        // tolerance early) without making an established hold twitchy.
+        guard anchorMovedBeyondTolerance(anchorPath) else { return }
+        let dist = anchorDistanceFromStart(anchorPath)
+        let tol = currentAnchorTolerance
+        if anchorActivationActive {
+            ztLog("ANCHOR-ACTIVATION: CANCEL reason=anchorMovedWhileActive dist=\(String(format: "%.3f", dist)) tol=\(String(format: "%.3f", tol))")
+            resetGesture()
+        } else {
+            ztLog("ANCHOR-ACTIVATION: CANCEL reason=anchorMovedBeforeActive dist=\(String(format: "%.3f", dist)) tol=\(String(format: "%.3f", tol))")
             resetAnchorActivation(reason: "anchorMovedBeforeActive")
-            return
         }
     }
 
@@ -1593,7 +1560,7 @@ final class TouchCaptureManager {
               let anchorPathIndex,
               let anchorPath = activeTouches[anchorPathIndex],
               (allowAdditionalTouches || activeTouches.count == 1),
-              !anchorMovedTooFar(anchorPath) else {
+              !anchorMovedBeyondTolerance(anchorPath) else {
                         ztLog("ANCHOR-ACTIVATION: CANCEL activationConditionsChanged")
                         resetAnchorActivation(reason: "activationConditionsChanged")
             return
@@ -1605,7 +1572,7 @@ final class TouchCaptureManager {
         anchorActivationTimer?.cancel()
         anchorActivationTimer = nil
         AppState.shared.isGestureActive = true
-        ztLog("ANCHOR-ACTIVATION: ON path=\(anchorPathIndex)")
+        ztLog("ANCHOR-ACTIVATION: ON path=\(anchorPathIndex) dist=\(String(format: "%.4f", anchorDistanceFromStart(anchorPath)))")
         let allPaths = buildAnchorOverlayPaths()
         GestureOverlayWindow.shared.showTrace(paths: allPaths.isEmpty ? [visibleAnchorPath(anchorPath)] : allPaths, fingerCount: recognizedActiveFingerCount())
     }
@@ -1660,20 +1627,25 @@ final class TouchCaptureManager {
         }
     }
 
-    private func anchorMovedTooFar(_ path: [PathPoint], threshold: Double? = nil) -> Bool {
-        guard let start = anchorStartPoint, let last = path.last else { return false }
-        let dx = last.x - start.x
-        let dy = last.y - start.y
-        return sqrt(dx * dx + dy * dy) > (threshold ?? anchorMovementThreshold)
+    /// Straight-line distance the anchor finger has drifted from where it landed.
+    private func anchorDistanceFromStart(_ path: [PathPoint]) -> Double {
+        guard let start = anchorStartPoint, let last = path.last else { return 0 }
+        return hypot(last.x - start.x, last.y - start.y)
     }
 
-    /// Straight-line distance the anchor finger has moved from its origin. Used
-    /// for diagnostic logging when a candidate is cancelled for movement.
-    private func anchorMovedDistance(_ path: [PathPoint]) -> Double {
-        guard let start = anchorStartPoint, let last = path.last else { return 0 }
-        let dx = last.x - start.x
-        let dy = last.y - start.y
-        return sqrt(dx * dx + dy * dy)
+    /// Tolerance for how far the anchor finger may sit from its landing point.
+    /// Tight while counting down (so only a finger that truly stayed put can
+    /// activate — this rejects slow drags), looser once active (so an established
+    /// hold isn't twitchy while the user gestures with other fingers).
+    private var currentAnchorTolerance: Double {
+        let hold = AppState.shared.recognitionSettings.anchorHoldTolerance
+        return anchorActivationActive ? hold : hold * 0.5
+    }
+
+    /// True once the anchor finger has drifted beyond the current-phase tolerance
+    /// from its landing point. Small natural wiggles stay within.
+    private func anchorMovedBeyondTolerance(_ path: [PathPoint]) -> Bool {
+        anchorDistanceFromStart(path) > currentAnchorTolerance
     }
 
     private func resetAnchorActivation(reason: String) {
@@ -1726,12 +1698,6 @@ final class TouchCaptureManager {
         continuousAccumulator = 0
         pinchLastDistance = 0
         physicalClickTaintedGesture = false
-        // Arm the post-gesture cooldown from the ONE central teardown point. Every
-        // end-path (anchor lift, discard, finalize, dead gesture, continuous lift)
-        // funnels through here, so a rapid re-touch right after any interaction
-        // (e.g. one-finger continuous movement with slight lifts) can't immediately
-        // re-arm the anchor candidate. See handleAnchorActivationTouchBegan.
-        lastInteractionEndTime = ProcessInfo.processInfo.systemUptime
         updateCaptureFlags()
         AppState.shared.isGestureActive = false
     }

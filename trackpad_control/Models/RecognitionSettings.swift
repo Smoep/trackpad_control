@@ -77,6 +77,13 @@ final class RecognitionSettings {
     var anchorActivationDelay: Double = 0.40 {
         didSet { Self.d.set(anchorActivationDelay, forKey: "rs_anchorActivationDelay") }
     }
+    /// How far the anchor finger may drift (fraction of the trackpad, ~0–1) while
+    /// held before the anchor/overlay is cancelled. Small natural wiggles stay
+    /// within this; a deliberate slide exceeds it and returns to normal usage.
+    /// Applies both while counting down and once active. ~0.10 ≈ 1cm on the pad.
+    var anchorHoldTolerance: Double = 0.08 {
+        didSet { Self.d.set(anchorHoldTolerance, forKey: "rs_anchorHoldTolerance") }
+    }
     /// Cells of a 9×9 trackpad grid that are allowed to start an anchor hold.
     /// Cell index = row * 9 + col, where row 0 = top, col 0 = left.
     /// Defaults to all 81 cells (no restriction). Remove cells to block accidental
@@ -136,6 +143,9 @@ final class RecognitionSettings {
         }
         if d.object(forKey: "rs_anchorActivationDelay") != nil {
             anchorActivationDelay = d.double(forKey: "rs_anchorActivationDelay")
+        }
+        if d.object(forKey: "rs_anchorHoldTolerance") != nil {
+            anchorHoldTolerance = d.double(forKey: "rs_anchorHoldTolerance")
         }
         if let raw = d.string(forKey: "rs_anchorAllowedZones9") {
             let indices = raw.split(separator: ",").compactMap { Int($0) }.filter { (0..<81).contains($0) }
