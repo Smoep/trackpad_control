@@ -20,6 +20,19 @@ Unzip and drag **trackpad_control.app** to your Applications folder.
 - Triggers actions: launch apps, run shortcuts, execute continuous actions, and control windows
 - Runs from the menu bar with configurable settings and optional overlay diagnostics
 
+## Build & install
+
+Requires macOS 26 and Xcode 26+.
+
+```bash
+git clone https://github.com/Smoep/trackpad_control.git
+cd trackpad_control
+xcodebuild -project trackpad_control.xcodeproj -scheme trackpad_control -configuration Release \
+  -derivedDataPath build-release build
+cp -R build-release/Build/Products/Release/trackpad_control.app /Applications/trackpad_control.app
+open /Applications/trackpad_control.app
+```
+
 ## Keywords
 
 macOS, trackpad gestures, gesture recognition, gesture automation, menu bar app, window management, productivity, SwiftUI, multitouch
