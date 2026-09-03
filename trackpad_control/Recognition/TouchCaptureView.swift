@@ -204,6 +204,7 @@ enum FingerPathRenderer {
         // Compute bounding box for auto-fit mode
         var minX = Double.infinity, maxX = -Double.infinity
         var minY = Double.infinity, maxY = -Double.infinity
+        var fitCenterX = 0.5, fitCenterY = 0.5, fitSpan = 1.0
         if autoFit {
             for points in paths {
                 for p in points {
@@ -213,12 +214,14 @@ enum FingerPathRenderer {
                     if p.y > maxY { maxY = p.y }
                 }
             }
-            // Add 10% margin around bounding box
+            // Uniform scale: the same factor on both axes, so leg lengths and
+            // hooks look the way the matcher sees them (independent X/Y stretch
+            // made every L-shape look like it had equal legs).
             let rangeX = max(maxX - minX, 0.01)
             let rangeY = max(maxY - minY, 0.01)
-            let margin = max(rangeX, rangeY) * 0.1
-            minX -= margin; maxX += margin
-            minY -= margin; maxY += margin
+            fitSpan = max(rangeX, rangeY) * 1.2
+            fitCenterX = (minX + maxX) / 2
+            fitCenterY = (minY + maxY) / 2
         }
 
         for (fingerIndex, points) in paths.enumerated() {
@@ -230,8 +233,8 @@ enum FingerPathRenderer {
                 let nx: Double
                 let ny: Double
                 if autoFit {
-                    nx = (point.x - minX) / (maxX - minX)
-                    ny = (point.y - minY) / (maxY - minY)
+                    nx = 0.5 + (point.x - fitCenterX) / fitSpan
+                    ny = 0.5 + (point.y - fitCenterY) / fitSpan
                 } else {
                     nx = point.x
                     ny = point.y

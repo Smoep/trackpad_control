@@ -179,6 +179,10 @@ final class TouchCaptureManager {
     // version (blocking the events and CGAssociateMouseAndMouseCursorPosition
     // both "succeed" but the WindowServer moves the trackpad cursor anyway).
     nonisolated(unsafe) var anchorFrozenCursorPos: CGPoint?
+    // True while the most recent scroll sequence's active phase was swallowed by the
+    // tap. macOS still emits that sequence's momentum events after the fingers lift
+    // (measured: ~100 events, thousands of px), so they must be swallowed too.
+    nonisolated(unsafe) var swallowedScrollSequence = false
 
     // Physical trackpad click detection (Force Touch actuation).
     // A "tap" (including tap-to-click) does NOT press the sensor hard, so its
@@ -745,8 +749,7 @@ final class TouchCaptureManager {
                         if accepted
                             && hasDiscreteConflict
                             && !anchorActivationActive
-                            && !contGesture.continuousControl.isNavigationControl
-                            && contGesture.continuousControl != .windowHorizontalTiling {
+                            && !contGesture.continuousControl.isNavigationControl {
                             // When recorded shape gestures exist for this finger count,
                             // only let continuous claim paths that stay mostly straight.
                             let onAxis = effectiveH ? abs(dx) : abs(dy)
@@ -754,10 +757,20 @@ final class TouchCaptureManager {
                                 ? (primary.dropFirst().map { abs($0.y - first.y) }.max() ?? abs(dy))
                                 : (primary.dropFirst().map { abs($0.x - first.x) }.max() ?? abs(dx))
                             let cumulativeTurn = Self.cumulativeTurn(primary)
-                            let offAxisLimit = max(0.06, min(0.12, onAxis * 0.35))
-                            accepted = cumulativeTurn <= 0.9 && maxOffAxis <= offAxisLimit
+                            let offAxisLimit: Double
+                            if contGesture.continuousControl == .windowHorizontalTiling {
+                                // Tiling shares the 4-finger horizontal space with recorded
+                                // desktop-move shapes, which wander (turn >= 4.0 at lock-on)
+                                // while a real tiling swipe stays near-straight (turn ~1.2).
+                                // Off-axis excursion overlaps between the two, so turn alone decides.
+                                offAxisLimit = .infinity
+                                accepted = cumulativeTurn <= 2.5
+                            } else {
+                                offAxisLimit = max(0.06, min(0.12, onAxis * 0.35))
+                                accepted = cumulativeTurn <= 0.9 && maxOffAxis <= offAxisLimit
+                            }
                             if lastShapeGuardAccepted != accepted || now - lastShapeGuardLogTime > logThrottleInterval {
-                                ztLog("CONT-SHAPE-GUARD: turn=\(String(format:"%.2f", cumulativeTurn)) maxOff=\(String(format:"%.3f", maxOffAxis)) limit=\(String(format:"%.3f", offAxisLimit)) accepted=\(accepted)")
+                                ztLog("CONT-SHAPE-GUARD: control=\(contGesture.continuousControl.rawValue) turn=\(String(format:"%.2f", cumulativeTurn)) maxOff=\(String(format:"%.3f", maxOffAxis)) limit=\(String(format:"%.3f", offAxisLimit)) accepted=\(accepted)")
                                 lastShapeGuardAccepted = accepted
                                 lastShapeGuardLogTime = now
                             }
@@ -1165,8 +1178,16 @@ final class TouchCaptureManager {
         let duration = primaryPath.last?.timestamp ?? 0
         let pathLength = GestureNormalizer.pathLength(primaryPath)
         let isTap = duration < 0.4 && pathLength < 0.08
-        ztLog("ZT-check: dur=\(String(format: "%.3f", duration)) path=\(String(format: "%.4f", pathLength)) isTap=\(isTap) f=\(fingerCount)")
+        // Per-finger view for grounding the tap threshold: a real tap has every
+        // finger near-stationary; a flick fragment moves all of them fast.
+        let maxTravel = paths.map(GestureNormalizer.pathLength).max() ?? pathLength
+        let speed = duration > 0 ? maxTravel / duration : 0
+        ztLog("ZT-check: dur=\(String(format: "%.3f", duration)) path=\(String(format: "%.4f", pathLength)) maxTravel=\(String(format: "%.4f", maxTravel)) speed=\(String(format: "%.2f", speed)) isTap=\(isTap) f=\(fingerCount)")
         let now = ProcessInfo.processInfo.systemUptime
+
+        if isTap {
+            recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "tap", scores: [])
+        }
 
         if !isTap {
             // Non-tap gesture (swipe, etc.) breaks any active tap sequence
@@ -1362,14 +1383,17 @@ final class TouchCaptureManager {
             let margin = results[0].score - results[1].score
             if margin < settings.discreteAmbiguityMargin {
                 ztLog("DISCRETE-AMBIGUOUS: top=\(results[0].gesture.name)=\(String(format: "%.2f", results[0].score)) second=\(results[1].gesture.name)=\(String(format: "%.2f", results[1].score)) margin=\(String(format: "%.2f", margin)) limit=\(String(format: "%.2f", settings.discreteAmbiguityMargin)) → suppressed")
+                recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "ambiguous", scores: allScores)
                 return
             }
         }
 
         if let best = results.first {
             ztLog("DISCRETE-FIRE: \(best.gesture.name) score=\(String(format: "%.2f", best.score)) f=\(fingerCount) act=\(best.gesture.triggerAction.displayName) top=[\(topScores)]")
+            recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "fire", scores: allScores)
         } else {
             ztLog("DISCRETE-NOMATCH: f=\(fingerCount) top=[\(topScores)]")
+            recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "nomatch", scores: allScores)
         }
 
         guard let best = results.first else { return }
@@ -1387,6 +1411,22 @@ final class TouchCaptureManager {
         if !AppState.shared.recognitionSettings.testMode {
             TriggerExecutor.execute(best.gesture.triggerAction)
         }
+    }
+
+    /// Append the performed stroke (all finger paths, raw) and the recognizer's verdict
+    /// to live-strokes.jsonl. Coordinates rounded to 4 decimals to keep the file small.
+    private func recordLiveStroke(paths: [[PathPoint]], primaryPath: [PathPoint], fingerCount: Int, outcome: String, scores: [GestureMatcher.MatchResult]) {
+        guard UserDefaults.standard.bool(forKey: "adv_diagnostics") else { return }
+        func enc(_ path: [PathPoint]) -> String {
+            "[" + path.map { String(format: "[%.4f,%.4f,%.3f]", $0.x, $0.y, $0.timestamp) }.joined(separator: ",") + "]"
+        }
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let primaryIndex = paths.firstIndex { $0.count == primaryPath.count && $0.first?.x == primaryPath.first?.x } ?? -1
+        let top = scores.prefix(4).map { "[\"\(esc($0.gesture.name))\",\(String(format: "%.3f", $0.score))]" }.joined(separator: ",")
+        let json = "{\"t\":\(String(format: "%.3f", Date().timeIntervalSince1970)),\"fingers\":\(fingerCount),\"outcome\":\"\(outcome)\",\"primary\":\(primaryIndex),\"top\":[\(top)],\"paths\":[\(paths.map(enc).joined(separator: ","))]}"
+        appendLiveStrokeRecord(json)
     }
 
     private func executeZoneTap(_ gesture: GestureDefinition, fingerCount: Int) {
@@ -1543,8 +1583,10 @@ final class TouchCaptureManager {
               activeTouches.count == 1,
               completedPaths.isEmpty,
               let (pathIndex, path) = activeTouches.first,
-              let firstPoint = path.first else { return }
-        beginAnchorCandidate(pathIndex: pathIndex, point: firstPoint, startedAt: gestureLandingStartedAt)
+              let settledPoint = path.last else { return }
+        // Measure drift from where the finger sits after landing settles, not from the
+        // first contact sample: the centroid shifts ~0.013–0.02 as the finger flattens.
+        beginAnchorCandidate(pathIndex: pathIndex, point: settledPoint, startedAt: gestureLandingStartedAt)
     }
 
     private func handleAnchorActivationTouchBegan(pathIndex: Int32, point: PathPoint) {
@@ -1581,6 +1623,7 @@ final class TouchCaptureManager {
             let cellIndex = row * 9 + col
             if !allowedZones.contains(cellIndex) {
                 ztLog("ANCHOR-ACTIVATION: SKIP cell=\(cellIndex) (blocked zone row=\(row) col=\(col))")
+                anchorCandidateAttemptedThisGesture = true
                 return
             }
         }
@@ -2263,6 +2306,8 @@ final class TouchCaptureManager {
             | (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.mouseMoved.rawValue)
             | (1 << CGEventType.leftMouseDragged.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.leftMouseUp.rawValue)
         for t: UInt32 in [18, 27, 29, 30, 31, 32, 33, 34, 37] {
             eventMask |= (1 << t)
         }
@@ -2301,6 +2346,40 @@ final class TouchCaptureManager {
                     }
                     if mgr.globalFnActive { mgr.polledModifierActive = true }
                     return Unmanaged.passUnretained(event)  // always pass through
+                }
+
+                // Tap-to-click while the anchor is held is a gesture finger, not a click
+                // for the window underneath. Our own synthetic clicks (WindowManager
+                // drag) must still pass.
+                if type == .leftMouseDown || type == .leftMouseUp {
+                    if mgr.anchorActivationActive {
+                        let sourcePid = event.getIntegerValueField(.eventSourceUnixProcessID)
+                        if sourcePid == Int64(getpid()) {
+                            return Unmanaged.passUnretained(event)
+                        }
+                        return nil
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+
+                // Momentum events belong to the sequence whose active phase we already
+                // decided on; capture state has usually reset by the time they arrive.
+                // The same applies to the sequence's trailing changed/ended events: the
+                // MT lift frame can reset capture state before the last one reaches us
+                // (measured: one leaked `changed` then let a 2400px momentum burst through).
+                if type == .scrollWheel {
+                    let momentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
+                    if momentum != 0 {
+                        if mgr.swallowedScrollSequence {
+                            if momentum == 3 { mgr.swallowedScrollSequence = false }  // kCGMomentumScrollPhaseEnd
+                            return nil
+                        }
+                        return Unmanaged.passUnretained(event)
+                    }
+                    let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+                    if mgr.swallowedScrollSequence && (phase == 2 || phase == 4 || phase == 8) {
+                        return nil  // changed / ended / cancelled of a swallowed sequence
+                    }
                 }
 
                 // While the anchor hold is active, a second finger drawing a gesture
@@ -2373,6 +2452,17 @@ final class TouchCaptureManager {
                 } else {
                     // No modifier held: only block when a continuous-family gesture is active
                     shouldBlock = mgr.isContinuousSession
+                }
+
+                // A `began` (1) re-decides the sequence; a blocked `changed` (2) after a
+                // leaked began also claims it. Never un-claim on changed.
+                if type == .scrollWheel {
+                    let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+                    if phase == 1 {
+                        mgr.swallowedScrollSequence = shouldBlock
+                    } else if phase == 2 && shouldBlock {
+                        mgr.swallowedScrollSequence = true
+                    }
                 }
 
                 guard shouldBlock else {

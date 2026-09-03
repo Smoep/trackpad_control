@@ -41,6 +41,26 @@ func mtdLog(_ s: String) {
     appendDiagnosticsLogLine("\(mtdLogFormatter.string(from: Date())) \(s)")
 }
 
+// Live stroke corpus: one JSON object per line, every discrete/tap stroke with its
+// raw finger paths and the recognizer's verdict. Lets matcher changes be evaluated
+// offline against what the user actually did (scripts/matcher_experiment.py --live).
+private let liveStrokesURL: URL = mtdLogURL.deletingLastPathComponent().appendingPathComponent("live-strokes.jsonl")
+
+func appendLiveStrokeRecord(_ json: String) {
+    guard UserDefaults.standard.bool(forKey: "adv_diagnostics") else { return }
+    let line = json + "\n"
+    mtdLogQueue.async {
+        guard let data = line.data(using: .utf8) else { return }
+        if let fh = try? FileHandle(forWritingTo: liveStrokesURL) {
+            defer { try? fh.close() }
+            _ = try? fh.seekToEnd()
+            try? fh.write(contentsOf: data)
+        } else {
+            try? data.write(to: liveStrokesURL)
+        }
+    }
+}
+
 func clearDiagnosticsLog() {
     mtdLogQueue.sync {
         try? Data().write(to: mtdLogURL, options: .atomic)
