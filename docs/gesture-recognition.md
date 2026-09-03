@@ -100,3 +100,30 @@ $$\text{score}=\text{sim}\times\max\!\big(0,\,1-0.15\cdot|\,\text{turns}_a-\text
 Notes: confused pairs were BRQ↔Close tab and Max↔TRQ — both fixed by smoothing.
 Whole-shape "cloud" prototype scored worse (64%); angular matcher retained.
 Sample counts and smoothing were the proven levers; centroid not adopted.
+
+## 7. Live-stroke corpus (added 2026-09-03) — evaluate against real strokes, not recordings
+
+Leave-one-out over the *recorded* library reached 98.3% while live use still showed
+~10% failures (46 no-match, 22 ambiguous in 601 fires). The library is clean; the
+failures are the tail of live variation (e.g. Kopy = up-then-right with the right leg
+at 12–18% of the path instead of the recorded ~30%). Synthetic perturbations of
+recordings were **misleading**: a corner-first (leg-normalized) matcher looked like a
+clear win on them, yet scored a real live BRQ at 0.57 where the app scored 0.845.
+
+With diagnostics on, every discrete/tap stroke is appended to
+`~/Library/Application Support/TrackpadControl/live-strokes.jsonl`:
+`{t, fingers, outcome: fire|ambiguous|nomatch|tap, primary, top:[[name,score]…], paths:[[[x,y,t]…]…]}`.
+
+- Replay any matcher variant: `python3 scripts/matcher_experiment.py --live`
+  (reports agree / would-fix / would-break per variant; harness scores match the app within ~0.02).
+- Rule: a matcher change ships only if it fixes real failures in the corpus without
+  breaking real fires. Never from LOO or perturbation results alone.
+
+Other verified facts from that investigation:
+- Trackpad aspect (~1.6) is not the problem; correcting for it made things worse.
+- Stroke speed (2–3× fewer samples) is handled fine by the current smoothing.
+- Thumbnails previously stretched X and Y independently (`autoFit`), making every
+  L look equal-legged; now uniform scale.
+- The scroll "bleed" behind 3-finger gestures was macOS **momentum** after lift, not
+  the active phase; measured with `scripts/scroll_listener.swift` (listen-only tap
+  downstream of the app). Fixed by swallowing a blocked sequence through momentum end.

@@ -21,3 +21,12 @@
 - `No space left on device` while Xcode writes build metadata (for example `build-debug/info.plist`) means disk pressure is the root cause, not app logic.
 - Build marked "green" plus a successful direct app-bundle launch check indicates toolchain/build output is healthy.
 - Matching deployed/build binary hashes and a new app PID after relaunch confirm the running app is the new build.
+
+## Diagnosis lessons (2026-09-03)
+- Measure before theorizing. Three code-reading theories for the scroll bleed (main-thread race, staggered landing, stale 5 s valve) were all wrong; a 60-line listen-only event tap (`scripts/scroll_listener.swift`) showed the leak was macOS momentum after lift within one test round.
+- Anchor holds were rejected because drift was measured from the first contact sample; the finger centroid shifts 0.013–0.02 while flattening. Measure from the position at candidate start.
+- Tap-to-click during an anchor hold reached the window behind because `leftMouseDown/Up` were not in the blocking tap's mask.
+- A blocked scroll sequence's trailing `changed` event can arrive after the MT lift frame has reset capture state — decide per sequence (`swallowedScrollSequence`), never per event.
+- Offline harness ≠ live reality: leave-one-out on recordings was 98% while live failures were ~10%. Record live strokes (`live-strokes.jsonl`) and evaluate matcher changes against those; synthetic perturbations of recordings gave the wrong answer.
+- Sample thumbnails stretched X/Y independently, hiding leg-length and hook differences between recordings; visuals used for judging data must be to scale.
+- The `SKIP cell=` anchor-zone log repeated every frame (69% of a 41 MB log) because the "attempted" flag was set after the early return.
