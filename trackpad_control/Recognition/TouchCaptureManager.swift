@@ -734,13 +734,22 @@ final class TouchCaptureManager {
                                 }
                                 let netAxRatio = axisRatio
                                 let _ = netAxRatio  // suppress unused warning
+                                let lockTurn = Self.cumulativeTurn(primary)
                                 if contGesture.continuousControl == .cycleWindows {
+                                    // 2026-09-04: 3-finger circles (Open Safari/Chrome) never reached the
+                                    // matcher because the first 120-400 ms of a circle is a horizontal arc
+                                    // that passed this rule (all 10 recordings, 20/37 live touches). Real
+                                    // cycle swipes (7 "Probe CW" recordings) lock with maxOff <= 0.06 and
+                                    // turn <= 1.3; circles have maxOff > 0.10 or turn > 2.0 by the time the
+                                    // net-axis test passes. Replayed in scripts/lock_gate_experiment.py:
+                                    // circles 0/10 -> 9/10, Probe CW 7/7 unchanged, 0 live strokes change.
                                     accepted = axisRatio >= 1.35 && offAxis <= 0.35 && maxOffAxis <= 0.38
+                                        && maxOffAxis <= 0.10 && lockTurn <= 2.0
                                 } else {
                                     accepted = axisRatio >= 2.0 && offAxis <= 0.10 && maxOffAxis <= 0.12
                                 }
                                 if lastNavLockAccepted != accepted || now - lastNavLockLogTime > logThrottleInterval {
-                                    ztLog("NAV-LOCK: control=\(contGesture.continuousControl.rawValue) ratio=\(String(format:"%.2f",axisRatio)) netOff=\(String(format:"%.3f",offAxis)) maxOff=\(String(format:"%.3f",maxOffAxis)) accepted=\(accepted)")
+                                    ztLog("NAV-LOCK: control=\(contGesture.continuousControl.rawValue) ratio=\(String(format:"%.2f",axisRatio)) netOff=\(String(format:"%.3f",offAxis)) maxOff=\(String(format:"%.3f",maxOffAxis)) turn=\(String(format:"%.2f",lockTurn)) accepted=\(accepted)")
                                     lastNavLockAccepted = accepted
                                     lastNavLockLogTime = now
                                 }
@@ -762,9 +771,15 @@ final class TouchCaptureManager {
                                 // Tiling shares the 4-finger horizontal space with recorded
                                 // desktop-move shapes, which wander (turn >= 4.0 at lock-on)
                                 // while a real tiling swipe stays near-straight (turn ~1.2).
-                                // Off-axis excursion overlaps between the two, so turn alone decides.
-                                offAxisLimit = .infinity
-                                accepted = cumulativeTurn <= 2.5
+                                // 2026-09-04: turn alone was not enough. Windows-RD / Window-LD are
+                                // U/J shapes whose first 100-200 ms is a horizontal arc with turn
+                                // 2.2-2.5 and ~0.1 vertical excursion; 3/7 RD and 1/6 LD recordings
+                                // locked as tiling (owner confirmed it happens live). Of 76 real
+                                // tiling locks in the logs, 70 had maxOff <= 0.060; the 6 at
+                                // 0.108-0.134 were those RD/LD shapes. Replay: RD 3->6, LD 5->6,
+                                // nothing else changes (scripts/lock_gate_experiment.py --fingers 4).
+                                offAxisLimit = 0.08
+                                accepted = cumulativeTurn <= 2.5 && maxOffAxis <= offAxisLimit
                             } else {
                                 offAxisLimit = max(0.06, min(0.12, onAxis * 0.35))
                                 accepted = cumulativeTurn <= 0.9 && maxOffAxis <= offAxisLimit
@@ -1329,21 +1344,20 @@ final class TouchCaptureManager {
             }
         }
 
-        // Normal discrete gesture matching
-        let results = GestureMatcher.match(
+        // Normal discrete gesture matching. One evaluation: `confident` is the
+        // thresholded ranking that fires, `all` feeds telemetry and the log.
+        let evaluation = GestureMatcher.evaluate(
             performedPath: primaryPath,
             fingerCount: fingerCount,
             gestures: gestures,
             settings: settings
         )
-
-        // Compute all scores for telemetrics (including below threshold)
-        let allScores = GestureMatcher.matchAll(
-            performedPath: primaryPath,
-            fingerCount: fingerCount,
-            gestures: gestures,
-            settings: settings
-        )
+        let results = evaluation.confident
+        let allScores = evaluation.all
+        // Appended to every DISCRETE-* line; "tiebreak=-" when the corner rule did not run.
+        let tieBreakField = evaluation.tieBreak.map {
+            "corners=\($0.liveCorners) tiebreak=\($0.promoted)>\($0.demoted)"
+        } ?? "tiebreak=-"
 
         // Update telemetrics
         let appState = AppState.shared
@@ -1382,17 +1396,17 @@ final class TouchCaptureManager {
         if results.count >= 2 {
             let margin = results[0].score - results[1].score
             if margin < settings.discreteAmbiguityMargin {
-                ztLog("DISCRETE-AMBIGUOUS: top=\(results[0].gesture.name)=\(String(format: "%.2f", results[0].score)) second=\(results[1].gesture.name)=\(String(format: "%.2f", results[1].score)) margin=\(String(format: "%.2f", margin)) limit=\(String(format: "%.2f", settings.discreteAmbiguityMargin)) → suppressed")
+                ztLog("DISCRETE-AMBIGUOUS: top=\(results[0].gesture.name)=\(String(format: "%.2f", results[0].score)) second=\(results[1].gesture.name)=\(String(format: "%.2f", results[1].score)) margin=\(String(format: "%.2f", margin)) limit=\(String(format: "%.2f", settings.discreteAmbiguityMargin)) \(tieBreakField) → suppressed")
                 recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "ambiguous", scores: allScores)
                 return
             }
         }
 
         if let best = results.first {
-            ztLog("DISCRETE-FIRE: \(best.gesture.name) score=\(String(format: "%.2f", best.score)) f=\(fingerCount) act=\(best.gesture.triggerAction.displayName) top=[\(topScores)]")
+            ztLog("DISCRETE-FIRE: \(best.gesture.name) score=\(String(format: "%.2f", best.score)) f=\(fingerCount) act=\(best.gesture.triggerAction.displayName) top=[\(topScores)] \(tieBreakField)")
             recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "fire", scores: allScores)
         } else {
-            ztLog("DISCRETE-NOMATCH: f=\(fingerCount) top=[\(topScores)]")
+            ztLog("DISCRETE-NOMATCH: f=\(fingerCount) top=[\(topScores)] \(tieBreakField)")
             recordLiveStroke(paths: paths, primaryPath: primaryPath, fingerCount: fingerCount, outcome: "nomatch", scores: allScores)
         }
 

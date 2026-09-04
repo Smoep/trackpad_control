@@ -123,21 +123,153 @@ def score(perf_pts, samp_pts, variant, turn_penalty):
     pt = base.count_turns(base.direction_angles(base.resample(pp)))
     st = base.count_turns(base.direction_angles(base.resample(ss)))
     pen = max(0.0, 1.0 - abs(pt - st) * turn_penalty)
-    net = base.net_direction_factor(prs, srs)
+    net = net_direction(prs, srs, variant)
     oc = base.open_closed_path_factor(prs, srs)
     return sim * pen * net * oc
 
 
+NET_GATE_OPENNESS = 0.15   # below this the start->end vector is noise (there-and-back strokes)
+
+
+def net_direction(a, b, variant):
+    if "netgate" in variant and base.path_openness(a) < NET_GATE_OPENNESS and base.path_openness(b) < NET_GATE_OPENNESS:
+        return 1.0
+    if "netw1" in variant:
+        saved = base.NET_DIRECTION_WEIGHT
+        base.NET_DIRECTION_WEIGHT = 1.0
+        try:
+            return base.net_direction_factor(a, b)
+        finally:
+            base.NET_DIRECTION_WEIGHT = saved
+    return base.net_direction_factor(a, b)
+
+
 VARIANTS = {
     "baseline": ("plain", 0.15),
-    "legnorm": ("legnorm", 0.15),
-    "legnorm+minleg": ("legnorm+minleg", 0.15),
-    "postsmooth": ("postsmooth", 0.15),
-    "postsmooth+legnorm+minleg": ("postsmooth+legnorm+minleg", 0.15),
+    "corner-tiebreak": ("plain+corner", 0.15),
+    "gsign-longest": ("gsign", 0.15),
+    "gsign-allfingers": ("gsign+fingers", 0.15),
 }
 
 
-def rank(perf_pts, fingers, shapes, variant, tp, exclude=None):
+# --- GestureSign port (PointPatternMath / PointPatternAnalyzer) --------------
+GS_PRECISION = 100
+
+
+def gs_angles(pts):
+    rs = base.resample(pts, GS_PRECISION)
+    return [math.atan2(rs[i][1] - rs[i-1][1], rs[i][0] - rs[i-1][0]) for i in range(1, len(rs))]
+
+
+def gs_score(a_pts, b_pts):
+    a, b = gs_angles(a_pts), gs_angles(b_pts)
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    tot = 0.0
+    for i in range(n):
+        d = abs(a[i] - b[i])
+        if d > math.pi:
+            d = 2 * math.pi - d
+        tot += d
+    return 1.0 - (tot / n) / math.pi          # GestureSign probability / 100
+
+
+def finger_paths(sample):
+    fps = sample.get("fingerPaths") or []
+    paths = [[(p["x"], p["y"]) for p in f] for f in fps if len(f) >= 2]
+    return sorted(paths, key=lambda p: p[0][0])  # align fingers left-to-right
+
+
+def gs_rank(perf_paths, fingers, shapes, per_finger, exclude=None):
+    results = []
+    for g in shapes:
+        if g["fingerCount"] != fingers:
+            continue
+        best = 0.0
+        for si, s in enumerate(g["samples"]):
+            if exclude and g is exclude[0] and si == exclude[1]:
+                continue
+            if per_finger:
+                sp = finger_paths(s)
+                if len(sp) != len(perf_paths):
+                    continue
+                probs = [gs_score(pa, pb) for pa, pb in zip(perf_paths, sp)]
+                sc = min(probs) if all(p > 0.80 for p in probs) else 0.0
+            else:
+                sp = base.sample_path(s)
+                sc = gs_score(max(perf_paths, key=len), sp) if len(sp) >= 2 else 0.0
+            best = max(best, sc)
+        results.append((g["name"], best))
+    results.sort(key=lambda r: -r[1])
+    return results
+
+# User-labelled intent for live strokes (2026-09-04), keyed by stroke timestamp.
+LABELS = {
+    1788407248.431: "Window - BLQ",
+    1788423772.091: "Window - BLQ",   # app fired Close tab 0.87 — wrong
+    1788423774.206: "Window - BLQ",
+    1788423830.79:  "Window - TRQ",
+    1788454561.131: "Window - LD",
+}
+
+TIE_MARGIN = 0.12      # only strokes this close are re-decided
+TIE_LOSER_FACTOR = 0.80
+CORNER_SHARP_DEG = 40  # heading change across a 15% window
+CORNER_WIN = 0.15
+CORNER_MIN_TAIL = 0.10 # remaining path after the corner
+
+
+def sharp_corners(pts):
+    """Count real L-corners; ignores gentle curvature and end hooks."""
+    rs = base.resample(smooth(pts)); n = len(rs); w = max(2, int(n * CORNER_WIN))
+    total = base.path_len(rs) or 1e-9
+    count = 0
+    for c in corner_indices(base.direction_angles(rs)):
+        a = rs[max(0, c - w):c + 1]; b = rs[c:min(n, c + w + 1)]
+        if len(a) < 2 or len(b) < 2:
+            continue
+        ha = math.atan2(a[-1][1] - a[0][1], a[-1][0] - a[0][0])
+        hb = math.atan2(b[-1][1] - b[0][1], b[-1][0] - b[0][0])
+        d = abs(hb - ha); d = min(d, 2 * math.pi - d)
+        if math.degrees(d) >= CORNER_SHARP_DEG and base.path_len(rs[c:]) / total >= CORNER_MIN_TAIL:
+            count += 1
+    return count
+
+
+_typical_cache = {}
+
+
+def typical_turns(g):
+    key = id(g)
+    if key not in _typical_cache:
+        ts = sorted(sharp_corners(base.sample_path(s)) for s in g["samples"] if len(base.sample_path(s)) >= 2)
+        _typical_cache[key] = ts[len(ts) // 2] if ts else 0
+    return _typical_cache[key]
+
+
+def corner_tiebreak(results, perf_pts, shapes):
+    """If the top two are close and disagree on corner count, let the live corner count decide."""
+    if len(results) < 2 or results[0][1] - results[1][1] >= TIE_MARGIN:
+        return results
+    by_name = {g["name"]: g for g in shapes}
+    a, b = results[0], results[1]
+    ta, tb = typical_turns(by_name[a[0]]), typical_turns(by_name[b[0]])
+    if ta == tb:
+        return results
+    live = sharp_corners(perf_pts)
+    da, db = abs(live - ta), abs(live - tb)
+    if da < db:
+        results[1] = (b[0], b[1] * TIE_LOSER_FACTOR)
+    elif db < da:
+        results[0] = (a[0], a[1] * TIE_LOSER_FACTOR)
+    results.sort(key=lambda r: -r[1])
+    return results
+
+
+def rank(perf_pts, fingers, shapes, variant, tp, exclude=None, perf_paths=None):
+    if "gsign" in variant:
+        return gs_rank(perf_paths or [perf_pts], fingers, shapes, "fingers" in variant, exclude)
     results = []
     for g in shapes:
         if g["fingerCount"] != fingers:
@@ -151,10 +283,14 @@ def rank(perf_pts, fingers, shapes, variant, tp, exclude=None):
                 best = max(best, score(perf_pts, sp, variant, tp))
         results.append((g["name"], best))
     results.sort(key=lambda r: -r[1])
+    if "corner" in variant:
+        results = corner_tiebreak(results, perf_pts, [g for g in shapes if g["fingerCount"] == fingers])
     return results
 
 
 def loo(shapes, variant, tp, thr=0.60, margin_lim=0.06):
+    if "gsign" in variant:
+        thr, margin_lim = 0.80, 0.0   # GestureSign: ProbabilityThreshold=80, no margin rule
     total = correct = ambiguous = below = 0
     confusion = defaultdict(int)
     for held in shapes:
@@ -162,7 +298,8 @@ def loo(shapes, variant, tp, thr=0.60, margin_lim=0.06):
             pts = base.sample_path(hs)
             if len(pts) < 2:
                 continue
-            res = rank(pts, held["fingerCount"], shapes, variant, tp, exclude=(held, hi))
+            res = rank(pts, held["fingerCount"], shapes, variant, tp, exclude=(held, hi),
+                       perf_paths=finger_paths(hs) or [pts])
             total += 1
             if not res:
                 below += 1
@@ -247,11 +384,25 @@ def live_replay(shapes, live_path):
             pts = [(p[0], p[1]) for p in prim]
             if len(pts) < 2:
                 continue
-            res = rank(pts, r["fingers"], shapes, variant, tp)
+            res = rank(pts, r["fingers"], shapes, variant, tp,
+                       perf_paths=sorted(([(p[0], p[1]) for p in f] for f in paths if len(f) >= 2), key=lambda p: p[0][0]))
             top = res[0] if res else ("", 0.0)
             second = res[1][1] if len(res) > 1 else 0.0
-            verdict = "nomatch" if top[1] < 0.60 else ("ambiguous" if top[1] - second < 0.06 else "fire")
+            thr, mlim = (0.80, 0.0) if "gsign" in variant else (0.60, 0.06)
+            verdict = "nomatch" if top[1] < thr else ("ambiguous" if top[1] - second < mlim else "fire")
             app_top = r["top"][0][0] if r.get("top") else ""
+            truth = LABELS.get(r["t"])
+            if truth is not None:
+                # Ground truth known: judge against intent, not against the app.
+                app_ok = r["outcome"] == "fire" and app_top == truth
+                new_ok = verdict == "fire" and top[0] == truth
+                if new_ok == app_ok:
+                    agree += 1
+                elif new_ok:
+                    fixed += 1; changed.append(f"    LABEL {truth}: app {r['outcome']} {app_top} -> fire {top[0]} {top[1]:.2f}  FIXED")
+                else:
+                    broke += 1; changed.append(f"    LABEL {truth}: app {r['outcome']} {app_top} -> {verdict} {top[0]} {top[1]:.2f}  BROKE")
+                continue
             same = verdict == r["outcome"] and (verdict != "fire" or top[0] == app_top)
             if same:
                 agree += 1

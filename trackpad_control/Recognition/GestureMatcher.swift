@@ -12,6 +12,23 @@ enum GestureMatcher {
         let bestSampleIndex: Int
     }
 
+    /// Diagnostics of a corner tie-break decision (see `cornerTieBreak`).
+    struct TieBreak {
+        let liveCorners: Int
+        let promoted: String
+        let demoted: String
+    }
+
+    struct Evaluation {
+        /// Every candidate of the finger count, scored, tie-break applied, best first.
+        let all: [MatchResult]
+        /// `all` filtered by the per-type confidence threshold.
+        let confident: [MatchResult]
+        let tieBreak: TieBreak?
+
+        static let empty = Evaluation(all: [], confident: [], tieBreak: nil)
+    }
+
     /// Match a performed gesture against all enabled gestures.
     /// Returns candidates sorted by score (best first), filtered by confidence threshold.
     static func match(
@@ -20,23 +37,43 @@ enum GestureMatcher {
         gestures: [GestureDefinition],
         settings: RecognitionSettings
     ) -> [MatchResult] {
+        evaluate(performedPath: performedPath, fingerCount: fingerCount, gestures: gestures, settings: settings).confident
+    }
+
+    /// Like match() but returns ALL gesture scores without confidence threshold filtering.
+    /// Used for telemetrics display.
+    static func matchAll(
+        performedPath: [PathPoint],
+        fingerCount: Int,
+        gestures: [GestureDefinition],
+        settings: RecognitionSettings
+    ) -> [MatchResult] {
+        evaluate(performedPath: performedPath, fingerCount: fingerCount, gestures: gestures, settings: settings).all
+    }
+
+    /// Score every enabled shape gesture of this finger count. The corner tie-break runs on
+    /// the full ranking, before threshold filtering, so a demoted top-1 can drop below the
+    /// threshold instead of firing — this is the order validated offline
+    /// (scripts/matcher_experiment.py `rank`, scripts/pipeline_eval.py).
+    static func evaluate(
+        performedPath: [PathPoint],
+        fingerCount: Int,
+        gestures: [GestureDefinition],
+        settings: RecognitionSettings
+    ) -> Evaluation {
 
         // Quick filter: minimum path length (use lowest threshold across types)
         let length = GestureNormalizer.pathLength(performedPath)
         let minLength = min(settings.discreteMinLength, settings.locationMinLength) * 0.1
-        guard length >= minLength else { return [] }
+        guard length >= minLength else { return .empty }
 
         // Resample only — no position normalization. Angular matching is inherently
         // position/scale independent. Smooth first to cancel per-finger jitter.
         let resampled = GestureNormalizer.resample(GestureNormalizer.smooth(performedPath))
         let performedAngles = GestureNormalizer.directionAngles(resampled)
-        guard !performedAngles.isEmpty else { return [] }
+        guard !performedAngles.isEmpty else { return .empty }
 
         var results: [MatchResult] = []
-
-        // Start position for zone filtering
-        let startX = performedPath.first?.x ?? 0
-        let startY = performedPath.first?.y ?? 0
 
         for gesture in gestures where gesture.isEnabled && !gesture.samples.isEmpty {
             // Skip continuous inputs — they don't use pattern matching
@@ -57,14 +94,7 @@ enum GestureMatcher {
             var bestIdx = 0
 
             for (idx, sample) in gesture.samples.enumerated() {
-                // Use longest individual finger path from the stored sample,
-                // not the centroid. Falls back to pathPoints if fingerPaths is empty.
-                let samplePath: [PathPoint]
-                if sample.fingerPaths.count > 1 {
-                    samplePath = sample.fingerPaths.max(by: { $0.count < $1.count }) ?? sample.pathPoints
-                } else {
-                    samplePath = sample.pathPoints
-                }
+                let samplePath = primaryPath(of: sample)
                 let resampledSample = GestureNormalizer.resample(GestureNormalizer.smooth(samplePath))
                 let sampleAngles = GestureNormalizer.directionAngles(resampledSample)
                 guard !sampleAngles.isEmpty else { continue }
@@ -93,73 +123,115 @@ enum GestureMatcher {
                 }
             }
 
-            if bestScore >= (gesture.inputType == .zoneTap ? settings.locationConfidence : settings.discreteConfidence) {
-                results.append(MatchResult(gesture: gesture, score: bestScore, bestSampleIndex: bestIdx))
-            }
-        }
-
-        return results.sorted { $0.score > $1.score }
-    }
-
-    /// Like match() but returns ALL gesture scores without confidence threshold filtering.
-    /// Used for telemetrics display.
-    static func matchAll(
-        performedPath: [PathPoint],
-        fingerCount: Int,
-        gestures: [GestureDefinition],
-        settings: RecognitionSettings
-    ) -> [MatchResult] {
-        let length = GestureNormalizer.pathLength(performedPath)
-        let minLength = min(settings.discreteMinLength, settings.locationMinLength) * 0.1
-        guard length >= minLength else { return [] }
-
-        let resampled = GestureNormalizer.resample(GestureNormalizer.smooth(performedPath))
-        let performedAngles = GestureNormalizer.directionAngles(resampled)
-        guard !performedAngles.isEmpty else { return [] }
-
-        var results: [MatchResult] = []
-
-        let startX = performedPath.first?.x ?? 0
-        let startY = performedPath.first?.y ?? 0
-
-        for gesture in gestures where gesture.isEnabled && !gesture.samples.isEmpty {
-            guard gesture.inputType != .continuous else { continue }
-            guard gesture.fingerCount == fingerCount else { continue }
-            if gesture.inputType == .zoneTap { continue }
-
-            var bestScore: Double = 0
-            var bestIdx = 0
-
-            for (idx, sample) in gesture.samples.enumerated() {
-                let samplePath: [PathPoint]
-                if sample.fingerPaths.count > 1 {
-                    samplePath = sample.fingerPaths.max(by: { $0.count < $1.count }) ?? sample.pathPoints
-                } else {
-                    samplePath = sample.pathPoints
-                }
-                let resampledSample = GestureNormalizer.resample(GestureNormalizer.smooth(samplePath))
-                let sampleAngles = GestureNormalizer.directionAngles(resampledSample)
-                guard !sampleAngles.isEmpty else { continue }
-
-                let score = angularSimilarity(performedAngles, sampleAngles)
-                let perfTurns = countTurns(performedAngles)
-                let sampTurns = countTurns(sampleAngles)
-                let turnDiff = abs(perfTurns - sampTurns)
-                let turnPenalty = 1.0 - Double(turnDiff) * 0.15
-                let netFactor = netDirectionFactor(resampled, resampledSample)
-                let openClosedFactor = openClosedPathFactor(resampled, resampledSample)
-                let finalScore = score * max(0, turnPenalty) * netFactor * openClosedFactor
-
-                if finalScore > bestScore {
-                    bestScore = finalScore
-                    bestIdx = idx
-                }
-            }
-
             results.append(MatchResult(gesture: gesture, score: bestScore, bestSampleIndex: bestIdx))
         }
 
-        return results.sorted { $0.score > $1.score }
+        results.sort { $0.score > $1.score }
+        let tieBreak = cornerTieBreak(&results, performedPath: performedPath)
+        let confident = results.filter {
+            $0.score >= ($0.gesture.inputType == .zoneTap ? settings.locationConfidence : settings.discreteConfidence)
+        }
+        return Evaluation(all: results, confident: confident, tieBreak: tieBreak)
+    }
+
+    /// Longest individual finger path of a stored sample, not the centroid.
+    /// Falls back to pathPoints if fingerPaths is empty.
+    private static func primaryPath(of sample: GestureSample) -> [PathPoint] {
+        if sample.fingerPaths.count > 1 {
+            return sample.fingerPaths.max(by: { $0.count < $1.count }) ?? sample.pathPoints
+        }
+        return sample.pathPoints
+    }
+
+    // MARK: - Corner tie-break
+
+    // 2026-09-04: L-shapes with a short second leg (12–18 % of the path) score almost the same
+    // as the straight stroke they start with, because the matcher weights by leg length —
+    // e.g. Window - BLQ vs Close tab, Kopy vs Mission C. Five owner-labelled live strokes: four
+    // were suppressed as ambiguous or fired the straight rival (one confident wrong Close tab).
+    // When the top two are within `tieBreakMargin` and their recordings disagree on how many
+    // sharp corners they have, let the live corner count decide and demote the loser.
+    // Offline: 4/4 labelled strokes fixed, 0 of the other live strokes change, leave-one-out
+    // ambiguous 3 → 0 (docs/gesture-recognition.md §8.3, scripts/matcher_experiment.py).
+    private static let tieBreakMargin = 0.12
+    private static let tieBreakLoserFactor = 0.80
+    private static let cornerSharpDegrees = 40.0
+    private static let cornerWindowShare = 0.15   // heading measured over this share of the path each side
+    private static let cornerMinTailShare = 0.10  // corners closer than this to the end are hooks, not legs
+
+    private static func cornerTieBreak(_ results: inout [MatchResult], performedPath: [PathPoint]) -> TieBreak? {
+        guard results.count >= 2, results[0].score - results[1].score < tieBreakMargin else { return nil }
+        let a = results[0], b = results[1]
+        let ta = typicalCorners(of: a.gesture), tb = typicalCorners(of: b.gesture)
+        guard ta != tb else { return nil }
+        let live = sharpCorners(performedPath)
+        let da = abs(live - ta), db = abs(live - tb)
+        guard da != db else { return nil }
+        let loser = da < db ? 1 : 0
+        let winner = 1 - loser
+        results[loser] = MatchResult(gesture: results[loser].gesture,
+                                     score: results[loser].score * tieBreakLoserFactor,
+                                     bestSampleIndex: results[loser].bestSampleIndex)
+        let info = TieBreak(liveCorners: live, promoted: results[winner].gesture.name, demoted: results[loser].gesture.name)
+        results.sort { $0.score > $1.score }
+        return info
+    }
+
+    /// Median sharp-corner count over a gesture's recordings.
+    private static func typicalCorners(of gesture: GestureDefinition) -> Int {
+        let counts = gesture.samples.map { primaryPath(of: $0) }
+            .filter { $0.count >= 2 }
+            .map { sharpCorners($0) }
+            .sorted()
+        return counts.isEmpty ? 0 : counts[counts.count / 2]
+    }
+
+    /// Count real L-corners: a turn > 40° in the smoothed heading (same detector as
+    /// `countTurns`) whose heading change measured over 15 % of the path on each side is
+    /// still ≥ 40°, and that leaves ≥ 10 % of the path after it. Gentle curvature and end
+    /// hooks (the 1–4° curl on Close-tab takes) do not count.
+    static func sharpCorners(_ path: [PathPoint]) -> Int {
+        let rs = GestureNormalizer.resample(GestureNormalizer.smooth(path))
+        let n = rs.count
+        guard n >= 4 else { return 0 }
+        let w = max(2, Int(Double(n) * cornerWindowShare))
+        let total = GestureNormalizer.pathLength(rs)
+        guard total > 1e-9 else { return 0 }
+        var count = 0
+        for c in cornerIndices(GestureNormalizer.directionAngles(rs)) {
+            let a = Array(rs[max(0, c - w)...c])
+            let b = Array(rs[c..<min(n, c + w + 1)])
+            guard a.count >= 2, b.count >= 2 else { continue }
+            let ha = atan2(a[a.count - 1].y - a[0].y, a[a.count - 1].x - a[0].x)
+            let hb = atan2(b[b.count - 1].y - b[0].y, b[b.count - 1].x - b[0].x)
+            var d = abs(hb - ha)
+            d = min(d, 2 * .pi - d)
+            let tailShare = GestureNormalizer.pathLength(Array(rs[c...])) / total
+            if d * 180 / .pi >= cornerSharpDegrees && tailShare >= cornerMinTailShare {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// Indices where the smoothed heading turns more than 40°. Same smoothing,
+    /// threshold and sampling step as `countTurns`, but returns the positions.
+    private static func cornerIndices(_ angles: [Double]) -> [Int] {
+        guard angles.count >= 4 else { return [] }
+        let smoothed = smoothedAngles(angles)
+        let threshold = cornerSharpDegrees * .pi / 180.0
+        let step = max(1, smoothed.count / 16)
+        var lastDir = smoothed[0]
+        var out: [Int] = []
+        for i in stride(from: step, to: smoothed.count, by: step) {
+            var diff = abs(smoothed[i] - lastDir)
+            if diff > .pi { diff = 2 * .pi - diff }
+            if diff > threshold {
+                out.append(i)
+                lastDir = smoothed[i]
+            }
+        }
+        return out
     }
 
     // MARK: - Angular Similarity
@@ -250,7 +322,14 @@ enum GestureMatcher {
     /// margin 0.376 → 0.421) with no new confusions. Weight 3.0 over-separates and
     /// breaks Window - C vs Close tab, so 2.0 is the ceiling.
     private static let netDirectionWeight = 2.0
+    // 2026-09-04 "netgate": for there-and-back strokes (Windows - C, and 4 of 5 Open Safari
+    // takes) the start→end vector is a few hundredths long and its direction is noise, so
+    // this factor zeroed genuine matches (Windows - C leave-one-out 2/6). When both paths
+    // are that closed, skip the factor; open-vs-closed separation is still done by
+    // `openClosedPathFactor`. Offline: fixes those, 0 live strokes change (docs §8.2).
+    private static let netGateOpenness = 0.15
     private static func netDirectionFactor(_ a: [PathPoint], _ b: [PathPoint]) -> Double {
+        if pathOpenness(a) < netGateOpenness && pathOpenness(b) < netGateOpenness { return 1.0 }
         guard let a0 = a.first, let a1 = a.last, let b0 = b.first, let b1 = b.last else { return 1.0 }
         let adx = a1.x - a0.x, ady = a1.y - a0.y
         let bdx = b1.x - b0.x, bdy = b1.y - b0.y
@@ -291,21 +370,7 @@ enum GestureMatcher {
     /// A turn is detected when the smoothed direction shifts by more than 40°.
     private static func countTurns(_ angles: [Double]) -> Int {
         guard angles.count >= 4 else { return 0 }
-
-        // Smooth angles with a sliding window to filter noise
-        let windowSize = max(3, angles.count / 12)
-        var smoothed: [Double] = []
-        for i in 0..<angles.count {
-            let start = max(0, i - windowSize / 2)
-            let end = min(angles.count, i + windowSize / 2 + 1)
-            // Average using circular mean (via sin/cos)
-            var sx = 0.0, sy = 0.0
-            for j in start..<end {
-                sx += cos(angles[j])
-                sy += sin(angles[j])
-            }
-            smoothed.append(atan2(sy / Double(end - start), sx / Double(end - start)))
-        }
+        let smoothed = smoothedAngles(angles)
 
         // Count direction changes exceeding 40° threshold
         let threshold = 40.0 * .pi / 180.0
@@ -322,5 +387,23 @@ enum GestureMatcher {
             }
         }
         return turns
+    }
+
+    /// Sliding-window circular mean of a heading sequence (window = count/12, min 3).
+    private static func smoothedAngles(_ angles: [Double]) -> [Double] {
+        let windowSize = max(3, angles.count / 12)
+        var smoothed: [Double] = []
+        smoothed.reserveCapacity(angles.count)
+        for i in 0..<angles.count {
+            let start = max(0, i - windowSize / 2)
+            let end = min(angles.count, i + windowSize / 2 + 1)
+            var sx = 0.0, sy = 0.0
+            for j in start..<end {
+                sx += cos(angles[j])
+                sy += sin(angles[j])
+            }
+            smoothed.append(atan2(sy / Double(end - start), sx / Double(end - start)))
+        }
+        return smoothed
     }
 }
