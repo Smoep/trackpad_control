@@ -115,7 +115,8 @@ enum GestureMatcher {
                 // separate cleanly instead of both scoring "up-ish".
                 let netFactor = netDirectionFactor(resampled, resampledSample)
                 let openClosedFactor = openClosedPathFactor(resampled, resampledSample)
-                let finalScore = score * max(0, turnPenalty) * netFactor * openClosedFactor
+                let legFactor = finalLegFactor(resampled, resampledSample)
+                let finalScore = score * max(0, turnPenalty) * netFactor * openClosedFactor * legFactor
 
                 if finalScore > bestScore {
                     bestScore = finalScore
@@ -158,6 +159,8 @@ enum GestureMatcher {
     private static let cornerSharpDegrees = 40.0
     private static let cornerWindowShare = 0.15   // heading measured over this share of the path each side
     private static let cornerMinTailShare = 0.10  // corners closer than this to the end are hooks, not legs
+    private static let cornerMinHeadShare = 0.10  // ... and the same at the start (2026-09-04: a landing
+                                                  // hook made a TRQ read as 3 corners -> fired Sandy-Right)
 
     private static func cornerTieBreak(_ results: inout [MatchResult], performedPath: [PathPoint]) -> TieBreak? {
         guard results.count >= 2, results[0].score - results[1].score < tieBreakMargin else { return nil }
@@ -207,7 +210,9 @@ enum GestureMatcher {
             var d = abs(hb - ha)
             d = min(d, 2 * .pi - d)
             let tailShare = GestureNormalizer.pathLength(Array(rs[c...])) / total
-            if d * 180 / .pi >= cornerSharpDegrees && tailShare >= cornerMinTailShare {
+            let headShare = GestureNormalizer.pathLength(Array(rs[...c])) / total
+            if d * 180 / .pi >= cornerSharpDegrees && tailShare >= cornerMinTailShare
+                && headShare >= cornerMinHeadShare {
                 count += 1
             }
         }
@@ -362,6 +367,29 @@ enum GestureMatcher {
         let length = GestureNormalizer.pathLength(path)
         guard length > 1e-9 else { return 0 }
         return hypot(last.x - first.x, last.y - first.y) / length
+    }
+
+    // 2026-09-04: shapes that share their first two thirds are told apart by where the
+    // last leg points — Open Chrome is a U that returns UP, System Settings a J that stays
+    // low; BLQ ends going LEFT, LD ends going UP. The index-by-index similarity weights
+    // that tail like any other segment, so a down-then-left L was reading as LD.
+    // Measured (scripts/blq_ld_options.py, variant 3a): LOO 118/118, labelled 5/5,
+    // worst margin +0.13 → +0.18, ambiguous unchanged; weight 1.0 costs a labelled stroke.
+    private static let finalLegShare = 0.25
+    private static let finalLegWeight = 0.5
+
+    private static func finalLegFactor(_ a: [PathPoint], _ b: [PathPoint]) -> Double {
+        guard let va = finalLegVector(a), let vb = finalLegVector(b) else { return 1.0 }
+        let cosine = max(-1.0, min(1.0, va.x * vb.x + va.y * vb.y))
+        return max(0.0, 1.0 - (acos(cosine) / .pi) * finalLegWeight)
+    }
+
+    private static func finalLegVector(_ path: [PathPoint]) -> (x: Double, y: Double)? {
+        guard path.count >= 4, let last = path.last else { return nil }
+        let start = path[max(0, Int(Double(path.count) * (1 - finalLegShare)))]
+        let dx = last.x - start.x, dy = last.y - start.y
+        let mag = hypot(dx, dy)
+        return mag < 1e-9 ? nil : (dx / mag, dy / mag)
     }
 
     // MARK: - Structural Complexity

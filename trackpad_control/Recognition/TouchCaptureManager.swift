@@ -2510,6 +2510,10 @@ final class TouchCaptureManager {
         eventTap = tap
         let src = CFMachPortCreateRunLoopSource(nil, tap, 0)
         tapRunLoopSource = src
+        // 2026-09-04: tried running this on a dedicated thread (fireinrain's fork) to keep
+        // main-thread stalls out of the input pipeline; measured TAP-GAP showed no benefit
+        // (3.1% -> 3.9% of gaps >=50ms), so it stays on main where the callback's reads of
+        // plain stored properties are consistent with the writers.
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
     }

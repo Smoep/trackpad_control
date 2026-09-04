@@ -125,7 +125,29 @@ def score(perf_pts, samp_pts, variant, turn_penalty):
     pen = max(0.0, 1.0 - abs(pt - st) * turn_penalty)
     net = net_direction(prs, srs, variant)
     oc = base.open_closed_path_factor(prs, srs)
-    return sim * pen * net * oc
+    return sim * pen * net * oc * final_leg_factor(prs, srs)
+
+
+FINAL_LEG_SHARE = 0.25   # last quarter of the path
+FINAL_LEG_WEIGHT = 0.5   # shipped 2026-09-04; see scripts/blq_ld_options.py variant 3a
+
+
+def _final_leg_vector(rs):
+    if len(rs) < 4:
+        return None
+    i = max(0, int(len(rs) * (1 - FINAL_LEG_SHARE)))
+    dx, dy = rs[-1][0] - rs[i][0], rs[-1][1] - rs[i][1]
+    n = math.hypot(dx, dy)
+    return None if n < 1e-9 else (dx / n, dy / n)
+
+
+def final_leg_factor(a, b):
+    """Where the last leg points: an L ending LEFT vs a U ending UP."""
+    va, vb = _final_leg_vector(a), _final_leg_vector(b)
+    if va is None or vb is None:
+        return 1.0
+    dot = max(-1.0, min(1.0, va[0] * vb[0] + va[1] * vb[1]))
+    return max(0.0, 1.0 - FINAL_LEG_WEIGHT * (math.acos(dot) / math.pi))
 
 
 NET_GATE_OPENNESS = 0.15   # below this the start->end vector is noise (there-and-back strokes)
@@ -218,10 +240,11 @@ TIE_LOSER_FACTOR = 0.80
 CORNER_SHARP_DEG = 40  # heading change across a 15% window
 CORNER_WIN = 0.15
 CORNER_MIN_TAIL = 0.10 # remaining path after the corner
+CORNER_MIN_HEAD = 0.10 # path before the corner (landing hooks are not legs)
 
 
 def sharp_corners(pts):
-    """Count real L-corners; ignores gentle curvature and end hooks."""
+    """Count real L-corners; ignores gentle curvature and start/end hooks."""
     rs = base.resample(smooth(pts)); n = len(rs); w = max(2, int(n * CORNER_WIN))
     total = base.path_len(rs) or 1e-9
     count = 0
@@ -232,7 +255,8 @@ def sharp_corners(pts):
         ha = math.atan2(a[-1][1] - a[0][1], a[-1][0] - a[0][0])
         hb = math.atan2(b[-1][1] - b[0][1], b[-1][0] - b[0][0])
         d = abs(hb - ha); d = min(d, 2 * math.pi - d)
-        if math.degrees(d) >= CORNER_SHARP_DEG and base.path_len(rs[c:]) / total >= CORNER_MIN_TAIL:
+        if math.degrees(d) >= CORNER_SHARP_DEG and base.path_len(rs[c:]) / total >= CORNER_MIN_TAIL \
+                and base.path_len(rs[:c + 1]) / total >= CORNER_MIN_HEAD:
             count += 1
     return count
 

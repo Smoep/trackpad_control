@@ -243,6 +243,11 @@ enum WindowManager {
     private static var horizontalCycleTimeByPID: [pid_t: TimeInterval] = [:]
     private static let horizontalCycleResetInterval: TimeInterval = 1.25
 
+    /// Bumped on every frame request; the async retry loop aborts when it no longer
+    /// matches, so a superseded target can't overwrite a newer one (2026-09-04: a
+    /// quarter-layout retry kept stomping the threeQuarters that replaced it).
+    private static var frameRequestGeneration: UInt64 = 0
+
     private struct WindowCycleCandidate {
         let windowID: CGWindowID
         let pid: pid_t
@@ -625,7 +630,21 @@ enum WindowManager {
         }
     }
 
+    /// AppKit asserts if an AX position/size write for a window belonging to OUR OWN
+    /// process happens off the main thread (2026-09-04: crashed cycleHorizontalTiling's
+    /// background retry loop when the tiled window was our own Settings window).
+    /// Cross-process AX writes are unaffected and stay off-main for responsiveness.
+    private static func requiresMainThread(_ axWindow: AXUIElement) -> Bool {
+        var ownerPid: pid_t = 0
+        guard AXUIElementGetPid(axWindow, &ownerPid) == .success else { return false }
+        return ownerPid == getpid() && !Thread.isMainThread
+    }
+
     private static func axSetPosition(_ axWindow: AXUIElement, _ point: CGPoint) {
+        if requiresMainThread(axWindow) {
+            DispatchQueue.main.sync { axSetPosition(axWindow, point) }
+            return
+        }
         var p = point
         if let v = AXValueCreate(.cgPoint, &p) {
             AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, v)
@@ -633,6 +652,10 @@ enum WindowManager {
     }
 
     private static func axSetSize(_ axWindow: AXUIElement, _ size: CGSize) {
+        if requiresMainThread(axWindow) {
+            DispatchQueue.main.sync { axSetSize(axWindow, size) }
+            return
+        }
         var s = size
         if let v = AXValueCreate(.cgSize, &s) {
             AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, v)
@@ -680,6 +703,9 @@ enum WindowManager {
                                y: screenHeight - target.origin.y - target.height)
         let size = target.size
 
+        frameRequestGeneration &+= 1
+        let generation = frameRequestGeneration
+
         let before = windowFrame(of: axWindow)
         applyFrame(axWindow, position, size)
 
@@ -702,6 +728,10 @@ enum WindowManager {
         DispatchQueue.global(qos: .userInitiated).async {
             for pass in 2...5 {
                 usleep(120_000)
+                guard generation == frameRequestGeneration else {
+                    mtdLog("H-TILE: retry superseded pass=\(pass)")
+                    return
+                }
                 if let off = frameOffset(axWindow, wantPos, wantSize), off <= 2 {
                     mtdLog("H-TILE: VERIFIED pass=\(pass)")
                     return
@@ -709,6 +739,10 @@ enum WindowManager {
                 applyFrame(axWindow, wantPos, wantSize)
             }
             usleep(120_000)
+            guard generation == frameRequestGeneration else {
+                mtdLog("H-TILE: retry superseded settle")
+                return
+            }
             if let off = frameOffset(axWindow, wantPos, wantSize), off <= 2 {
                 mtdLog("H-TILE: VERIFIED settled")
                 return
