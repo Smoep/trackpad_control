@@ -542,21 +542,10 @@ enum WindowManager {
             }
         } else {
             let target = targetFrame(for: action, in: visible)
-
-            // Convert from NSScreen coords (origin bottom-left) to Accessibility coords (origin top-left)
-            let axX = target.origin.x
-            let axY = screenH - target.origin.y - target.height
-
-            // Set position first, then size (order matters for screen edge clamping)
-            var position = CGPoint(x: axX, y: axY)
-            if let posValue = AXValueCreate(.cgPoint, &position) {
-                AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posValue)
-            }
-
-            var size = CGSize(width: target.size.width, height: target.size.height)
-            if let sizeValue = AXValueCreate(.cgSize, &size) {
-                AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeValue)
-            }
+            // setWindowFrame handles screen-edge clamping order (applyFrame) and
+            // verifies/retries — a plain one-shot position-then-size set here left
+            // Chromium-style windows at their old width (2026-09-05).
+            setWindowFrame(axWindow, target: target, screenHeight: screenH)
         }
 
         // Raise the window so it stays focused even if the cursor is over a different window
@@ -698,6 +687,23 @@ enum WindowManager {
         axSetPosition(axWindow, position)
     }
 
+    // AXEnhancedUserInterface is a private attribute (used by Rectangle, Amethyst,
+    // Hammerspoon, BTT) that puts an app's accessibility tree into a slower,
+    // notification-driven mode. While it's on, AX position/size writes get routed
+    // through that pipeline and land in visible animated steps instead of at once.
+    // Disable it for the duration of a resize, then restore whatever it was.
+    private static let axEnhancedUserInterfaceAttr = "AXEnhancedUserInterface" as CFString
+
+    private static func getEnhancedUserInterface(_ appElement: AXUIElement) -> Bool? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, axEnhancedUserInterfaceAttr, &value) == .success else { return nil }
+        return value as? Bool
+    }
+
+    private static func setEnhancedUserInterface(_ appElement: AXUIElement, _ enabled: Bool) {
+        AXUIElementSetAttributeValue(appElement, axEnhancedUserInterfaceAttr, enabled as CFTypeRef)
+    }
+
     private static func setWindowFrame(_ axWindow: AXUIElement, target: CGRect, screenHeight: CGFloat) {
         let position = CGPoint(x: target.origin.x,
                                y: screenHeight - target.origin.y - target.height)
@@ -705,27 +711,43 @@ enum WindowManager {
 
         frameRequestGeneration &+= 1
         let generation = frameRequestGeneration
-
-        let before = windowFrame(of: axWindow)
-        applyFrame(axWindow, position, size)
-
-        if let off = frameOffset(axWindow, position, size), off <= 2 {
-            mtdLog("H-TILE: VERIFIED")
-            return
-        }
-
-        var posSettable: DarwinBoolean = false
-        var sizeSettable: DarwinBoolean = false
-        AXUIElementIsAttributeSettable(axWindow, kAXPositionAttribute as CFString, &posSettable)
-        AXUIElementIsAttributeSettable(axWindow, kAXSizeAttribute as CFString, &sizeSettable)
-        mtdLog("H-TILE: pass1 posSettable=\(posSettable.boolValue) sizeSettable=\(sizeSettable.boolValue) before=\(describeFrame(before)) after=\(describeFrame(windowFrame(of: axWindow)))")
-
-        // Chrome animates resizes, so an immediate read catches mid-flight geometry.
-        // Let it settle and re-check BEFORE re-issuing, otherwise the retry restarts
-        // the animation and we fight it. Runs off the touch thread to keep input snappy.
         let wantPos = position
         let wantSize = size
+
+        // Whole sequence (including pass1) runs off the caller's thread — touch
+        // processing is dispatched onto main (TouchCaptureManager) and must stay snappy.
         DispatchQueue.global(qos: .userInitiated).async {
+            var ownerPid: pid_t = 0
+            AXUIElementGetPid(axWindow, &ownerPid)
+            let appElement = AXUIElementCreateApplication(ownerPid)
+            let wasEnhanced = getEnhancedUserInterface(appElement) ?? false
+            if wasEnhanced {
+                setEnhancedUserInterface(appElement, false)
+                mtdLog("H-TILE: disabled AXEnhancedUserInterface for resize")
+            }
+            defer {
+                if wasEnhanced {
+                    setEnhancedUserInterface(appElement, true)
+                }
+            }
+
+            let before = windowFrame(of: axWindow)
+            applyFrame(axWindow, wantPos, wantSize)
+
+            if let off = frameOffset(axWindow, wantPos, wantSize), off <= 2 {
+                mtdLog("H-TILE: VERIFIED")
+                return
+            }
+
+            var posSettable: DarwinBoolean = false
+            var sizeSettable: DarwinBoolean = false
+            AXUIElementIsAttributeSettable(axWindow, kAXPositionAttribute as CFString, &posSettable)
+            AXUIElementIsAttributeSettable(axWindow, kAXSizeAttribute as CFString, &sizeSettable)
+            mtdLog("H-TILE: pass1 posSettable=\(posSettable.boolValue) sizeSettable=\(sizeSettable.boolValue) before=\(describeFrame(before)) after=\(describeFrame(windowFrame(of: axWindow)))")
+
+            // Chrome animates resizes, so an immediate read catches mid-flight geometry.
+            // Let it settle and re-check BEFORE re-issuing, otherwise the retry restarts
+            // the animation and we fight it.
             for pass in 2...5 {
                 usleep(120_000)
                 guard generation == frameRequestGeneration else {

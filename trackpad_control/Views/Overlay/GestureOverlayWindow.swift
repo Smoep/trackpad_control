@@ -15,6 +15,12 @@ final class GestureOverlayWindow {
     private var lastDecisionLogTime: TimeInterval = 0
     private var lastShowTime: TimeInterval = 0
     private let minimumTraceVisibleDuration: TimeInterval = 0.25
+    // Bumped by every show* call. A hide/acknowledgment/diagnostic completion
+    // scheduled before a newer show captures the token beforehand and checks it
+    // hasn't changed before tearing the window down — otherwise a stale fade-out
+    // callback from gesture N can blank/order-out the overlay that gesture N+1
+    // already redisplayed (2026-09-05: flicker when re-triggered shortly after).
+    private var overlayGeneration = 0
 
     private func logDecision(_ message: String, force: Bool = false) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -27,6 +33,7 @@ final class GestureOverlayWindow {
 
     func showAnchorCandidate(progress: Double) {
         ensureWindow()
+        overlayGeneration += 1
         hideAnimationTimer?.cancel()
         hideAnimationTimer = nil
 
@@ -37,6 +44,10 @@ final class GestureOverlayWindow {
         overlayView.mode = .anchorCandidate
         overlayView.anchorCandidateProgress = min(max(progress, 0), 1)
         overlayView.needsDisplay = true
+        // Draw synchronously before ordering front — orderFrontRegardless() can
+        // composite the window before a deferred needsDisplay pass runs, showing
+        // one blank frame (2026-09-05: start-of-gesture flicker).
+        overlayView.displayIfNeeded()
         window?.orderFrontRegardless()
 
         if wasHidden {
@@ -49,6 +60,7 @@ final class GestureOverlayWindow {
 
     func showTrace(paths: [[PathPoint]], fingerCount: Int) {
         ensureWindow()
+        overlayGeneration += 1
         hideAnimationTimer?.cancel()
         hideAnimationTimer = nil
 
@@ -63,6 +75,8 @@ final class GestureOverlayWindow {
         if wasHidden {
             logDecision("SHOW showTrace desktopIdx=\(WindowManager.currentSpaceIdx) fingers=\(fingerCount) marker=\(Self.diagnosticBuildMarker)", force: true)
             overlayView.needsDisplay = true
+            // Draw synchronously before ordering front (see showAnchorCandidate).
+            overlayView.displayIfNeeded()
             window?.orderFrontRegardless()
             overlayView.playAppear()
         } else {
@@ -107,9 +121,10 @@ final class GestureOverlayWindow {
 
         logDecision("HIDE showState=true desktopIdx=\(WindowManager.currentSpaceIdx)", force: true)
         isHiding = true
+        let hideToken = overlayGeneration
         // Scale-down exit animation (Core Animation, GPU-composited)
         overlayView.playDisappear { [weak self] in
-            guard let self else { return }
+            guard let self, self.overlayGeneration == hideToken else { return }
             self.isShowing = false
             self.isHiding = false
             self.overlayView.paths = []
@@ -124,6 +139,8 @@ final class GestureOverlayWindow {
 
     func showAcknowledgment(name: String, at point: NSPoint, intensity: Double = 0.3) {
         ensureWindow()
+        overlayGeneration += 1
+        let ackToken = overlayGeneration
         logDecision("SHOW acknowledgment desktopIdx=\(WindowManager.currentSpaceIdx) name=\(name) marker=\(Self.diagnosticBuildMarker)", force: true)
         overlayView.mode = .acknowledgment
         overlayView.acknowledgmentName = name
@@ -131,11 +148,12 @@ final class GestureOverlayWindow {
         overlayView.acknowledgmentIntensity = intensity
         overlayView.acknowledgmentPhase = 1.0
         overlayView.needsDisplay = true
+        overlayView.displayIfNeeded()
         window?.orderFrontRegardless()
 
         // Draw once at full intensity, then bloom-and-dissolve the whole layer (GPU-composited)
         overlayView.playAcknowledgmentFade { [weak self] in
-            guard let self else { return }
+            guard let self, self.overlayGeneration == ackToken else { return }
             if self.overlayView.mode == .acknowledgment {
                 self.overlayView.mode = .idle
                 self.overlayView.needsDisplay = true
@@ -146,17 +164,20 @@ final class GestureOverlayWindow {
 
     func showDiagnosticSelfTest(duration: TimeInterval = 3.0) {
         ensureWindow()
+        overlayGeneration += 1
+        let diagToken = overlayGeneration
         hideAnimationTimer?.cancel()
         hideAnimationTimer = nil
         isShowing = true
         overlayView.mode = .diagnostic
         overlayView.needsDisplay = true
         logDecision("SHOW diagnostic self-test marker=\(Self.diagnosticBuildMarker) desktopIdx=\(WindowManager.currentSpaceIdx)", force: true)
+        overlayView.displayIfNeeded()
         window?.orderFrontRegardless()
         overlayView.playAppear()
 
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.overlayGeneration == diagToken else { return }
             self.logDecision("HIDE diagnostic self-test marker=\(Self.diagnosticBuildMarker) desktopIdx=\(WindowManager.currentSpaceIdx)", force: true)
             self.isShowing = false
             self.overlayView.mode = .idle
@@ -365,28 +386,6 @@ private final class GlassOverlayView: NSView {
         NSColor(white: 0.08, alpha: CGFloat(appearance.overlayBackgroundOpacity) * fade).setFill()
         padPath.fill()
 
-        // Inner gradient for depth
-        NSGraphicsContext.saveGraphicsState()
-        let gradientRect = padRect.insetBy(dx: 1, dy: 1)
-        NSBezierPath(roundedRect: gradientRect, xRadius: cornerRadius - 1, yRadius: cornerRadius - 1).addClip()
-        let gradient = NSGradient(
-            colors: [
-                NSColor(white: 1.0, alpha: 0.06 * fade),
-                NSColor(white: 1.0, alpha: 0.02 * fade),
-                NSColor(white: 0.0, alpha: 0.03 * fade),
-            ],
-            atLocations: [0.0, 0.5, 1.0],
-            colorSpace: .genericRGB
-        )
-        gradient?.draw(in: gradientRect, angle: 90)
-        NSGraphicsContext.restoreGraphicsState()
-
-        // Thin bright border
-        NSColor(white: 1.0, alpha: 0.12 * fade).setStroke()
-        let borderPath = NSBezierPath(roundedRect: padRect.insetBy(dx: 0.5, dy: 0.5), xRadius: cornerRadius, yRadius: cornerRadius)
-        borderPath.lineWidth = 1.0
-        borderPath.stroke()
-
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -439,31 +438,6 @@ private final class GlassOverlayView: NSView {
         // Dark translucent fill
         NSColor(white: 0.08, alpha: CGFloat(appearance.overlayBackgroundOpacity)).setFill()
         padPath.fill()
-
-        // Inner subtle gradient overlay for depth
-        let gradientRect = padRect.insetBy(dx: 1, dy: 1)
-        let gradientPath = NSBezierPath(roundedRect: gradientRect, xRadius: cornerRadius - 1, yRadius: cornerRadius - 1)
-        gradientPath.addClip()
-        let gradient = NSGradient(
-            colors: [
-                NSColor(white: 1.0, alpha: 0.06),
-                NSColor(white: 1.0, alpha: 0.02),
-                NSColor(white: 0.0, alpha: 0.03),
-            ],
-            atLocations: [0.0, 0.5, 1.0],
-            colorSpace: .genericRGB
-        )
-        gradient?.draw(in: gradientRect, angle: 90)
-
-        // Reset clipping
-        NSGraphicsContext.restoreGraphicsState()
-        NSGraphicsContext.saveGraphicsState()
-
-        // Border — thin bright edge
-        NSColor(white: 1.0, alpha: 0.12).setStroke()
-        let borderPath = NSBezierPath(roundedRect: padRect.insetBy(dx: 0.5, dy: 0.5), xRadius: cornerRadius, yRadius: cornerRadius)
-        borderPath.lineWidth = 1.0
-        borderPath.stroke()
 
         // Clip drawing to trackpad bounds (with small inset)
         let clipRect = padRect.insetBy(dx: 8, dy: 8)
@@ -534,24 +508,6 @@ private final class GlassOverlayView: NSView {
                 let innerDot: CGFloat = thickness
                 NSBezierPath(ovalIn: NSRect(x: x - innerDot / 2, y: y - innerDot / 2, width: innerDot, height: innerDot)).fill()
             }
-        }
-
-        // Finger count label at bottom of trackpad
-        NSGraphicsContext.restoreGraphicsState()
-        NSGraphicsContext.saveGraphicsState()
-
-        if fingerCount > 0 {
-            let labelText = "\(fingerCount) finger\(fingerCount > 1 ? "s" : "")"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.35)
-            ]
-            let str = NSAttributedString(string: labelText, attributes: attrs)
-            let strSize = str.size()
-            str.draw(at: NSPoint(
-                x: padRect.midX - strSize.width / 2,
-                y: padRect.minY - strSize.height - 6
-            ))
         }
     }
 
