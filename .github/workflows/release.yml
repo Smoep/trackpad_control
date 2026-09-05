@@ -50,7 +50,7 @@ jobs:
 
       - name: Verify deployment target and architecture
         run: |
-          APP="build-release/Build/Products/Release/Trackpad Control.app"
+          APP="build-release/Build/Products/Release/trackpad_control.app"
           BIN="$APP/Contents/MacOS/trackpad_control"
           echo "--- binary build metadata ---"
           vtool -show-build "$BIN"
@@ -66,7 +66,7 @@ jobs:
       - name: Package app
         run: |
           cd build-release/Build/Products/Release
-          zip -r -q "$GITHUB_WORKSPACE/trackpad_control-${{ github.ref_name }}.zip" "Trackpad Control.app"
+          zip -r -q "$GITHUB_WORKSPACE/trackpad_control-${{ github.ref_name }}.zip" "trackpad_control.app"
           shasum -a 256 "$GITHUB_WORKSPACE/trackpad_control-${{ github.ref_name }}.zip"
 
       - name: Publish GitHub Release
