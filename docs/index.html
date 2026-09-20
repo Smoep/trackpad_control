@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080b13">
+  <meta name="description" content="Turn custom one-to-five-finger trackpad gestures into app launches, shortcuts, window layouts, desktop switching, and continuous controls on macOS.">
+  <meta property="og:title" content="Trackpad Control — Your Mac, at your fingertips">
+  <meta property="og:description" content="Draw a gesture. Launch an app, arrange a window, switch desktops, or control your Mac.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://smoep.github.io/trackpad_control/">
+  <meta property="og:image" content="https://smoep.github.io/trackpad_control/images/trackpad-control-guide-preview.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Trackpad Control — Custom gestures for macOS</title>
+  <link rel="icon" href="assets/app-icon.png">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <nav class="site-nav" aria-label="Main navigation">
+    <div class="nav-inner">
+      <a class="brand" href="#top" aria-label="Trackpad Control home">
+        <img src="assets/app-icon.png" alt="" width="38" height="38">
+        <span>Trackpad Control</span>
+      </a>
+      <div class="nav-links">
+        <a href="#possibilities">Features</a>
+        <a href="#guide">Setup</a>
+        <a href="#reference">Guide</a>
+      </div>
+      <a class="button compact primary" href="https://github.com/Smoep/trackpad_control/releases/download/v1.2.2/trackpad_control-v1.2.2.zip">Download <span class="desktop-only">v1.2.2</span></a>
+    </div>
+  </nav>
+
+  <main id="main">
+    <header class="hero" id="top">
+      <div class="hero-copy reveal">
+        <p class="eyebrow"><span></span> Trackpad automation for macOS</p>
+        <h1>Your Mac,<br><span>at your fingertips.</span></h1>
+        <p class="hero-lede">Draw a gesture and get straight to the action. Open apps, run shortcuts, arrange windows, switch desktops, and control volume or brightness—without leaving the trackpad.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="https://github.com/Smoep/trackpad_control/releases/download/v1.2.2/trackpad_control-v1.2.2.zip">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
+            Download for Mac
+          </a>
+          <a class="button" href="#guide">See how it works</a>
+        </div>
+        <p class="hero-note">Version 1.2.2 · Apple silicon · macOS 26.4 or later</p>
+      </div>
+
+      <div class="hero-demo reveal" aria-label="Animated demonstration of a three-finger gesture opening Safari">
+        <div class="demo-chrome">
+          <div class="demo-menubar">
+            <span class="demo-apple">●</span>
+            <span>Finder</span>
+            <span class="demo-menu-copy">File&nbsp;&nbsp;&nbsp; Edit&nbsp;&nbsp;&nbsp; View</span>
+            <span class="demo-time">9:41</span>
+          </div>
+          <div class="demo-desktop">
+            <div class="demo-window window-back">
+              <div class="window-bar"><i></i><i></i><i></i></div>
+              <div class="window-content code-lines"></div>
+            </div>
+            <div class="demo-window window-front">
+              <div class="window-bar"><i></i><i></i><i></i><b>Project notes</b></div>
+              <div class="window-content">
+                <span class="line line-lg"></span><span class="line"></span><span class="line line-sm"></span>
+                <div class="note-card"></div>
+              </div>
+            </div>
+            <div class="recognition-pill"><span class="pill-check">✓</span><span><b>Open Safari</b><small>3-finger circle</small></span></div>
+            <div class="safari-result" aria-hidden="true">
+              <div class="safari-compass">↗</div>
+              <span>Safari</span>
+            </div>
+            <svg class="gesture-overlay" viewBox="0 0 640 410" role="img" aria-label="Three blue tracks draw a circular gesture">
+              <defs>
+                <filter id="glow"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              </defs>
+              <path class="gesture-path p1" pathLength="1" d="M308 238 C240 205 216 130 288 98 C372 60 432 130 400 196 C371 255 286 271 247 218"/>
+              <path class="gesture-path p2" pathLength="1" d="M329 250 C261 217 237 142 309 110 C393 72 453 142 421 208 C392 267 307 283 268 230"/>
+              <path class="gesture-path p3" pathLength="1" d="M287 250 C219 217 195 142 267 110 C351 72 411 142 379 208 C350 267 265 283 226 230"/>
+              <circle class="finger-dot d1" cx="247" cy="218" r="8"/>
+              <circle class="finger-dot d2" cx="268" cy="230" r="8"/>
+              <circle class="finger-dot d3" cx="226" cy="230" r="8"/>
+            </svg>
+            <div class="demo-caption"><span class="live-dot"></span><span class="caption-cycle"><b>Draw.</b><b>Recognize.</b><b>Done.</b></span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="proof-row reveal" aria-label="Product highlights">
+        <span><b>1–5</b> fingers</span>
+        <span><b>51</b> starter gestures</span>
+        <span><b>5</b> input styles</span>
+        <span><b>Local</b> gesture library</span>
+      </div>
+    </header>
+
+    <section class="story-section" id="possibilities">
+      <div class="section-heading reveal">
+        <p class="eyebrow">One surface. Many possibilities.</p>
+        <h2>Build muscle memory,<br>skip the busywork.</h2>
+        <p class="lede">Use the gestures that feel natural to you. Trackpad Control separates gestures by finger count, recognizes the path, and fires the action you chose.</p>
+      </div>
+
+      <div class="feature-grid">
+        <article class="feature-card feature-wide reveal">
+          <div class="feature-copy">
+            <span class="card-kicker">Draw your own</span>
+            <h3>A shape can become any shortcut.</h3>
+            <p>Record a circle, corner, line, or personal mark. Add multiple samples so recognition learns the way you really move.</p>
+          </div>
+          <div class="mini-trackpad shape-demo" aria-hidden="true">
+            <svg viewBox="0 0 430 250">
+              <path class="ghost-shape" d="M90 183 C82 94 112 62 177 60 C255 58 305 106 289 166 C275 218 193 218 151 182 C123 158 128 119 160 104 C204 83 244 113 233 148"/>
+              <path class="draw-shape" pathLength="1" d="M90 183 C82 94 112 62 177 60 C255 58 305 106 289 166 C275 218 193 218 151 182 C123 158 128 119 160 104 C204 83 244 113 233 148"/>
+            </svg>
+            <span class="gesture-label">Open Safari</span>
+          </div>
+        </article>
+
+        <article class="feature-card reveal">
+          <div class="feature-icon icon-zones" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <span class="card-kicker">Zone taps</span>
+          <h3>Give every corner a purpose.</h3>
+          <p>Turn single, double, or triple taps in nine trackpad zones into immediate actions.</p>
+        </article>
+
+        <article class="feature-card reveal">
+          <div class="feature-icon slider-demo" aria-hidden="true"><span></span><i></i></div>
+          <span class="card-kicker">Continuous control</span>
+          <h3>Move, and the Mac moves with you.</h3>
+          <p>Slide for volume, brightness, desktop navigation, window cycling, or your own shortcut.</p>
+        </article>
+
+        <article class="feature-card reveal">
+          <div class="feature-icon pinch-demo" aria-hidden="true"><i></i><i></i><span>+</span></div>
+          <span class="card-kicker">Pinch &amp; dial</span>
+          <h3>Controls that follow your fingers.</h3>
+          <p>Map spread, pinch, and rotation to smooth two-direction controls with adjustable sensitivity.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="window-section" id="windows">
+      <div class="section-heading centered reveal">
+        <p class="eyebrow">Stay in motion</p>
+        <h2>Windows, without the shuffle.</h2>
+        <p class="lede">Glide through Mission Control with a clear native highlight. Lift your fingers to choose the window you can already see.</p>
+      </div>
+      <div class="mission-demo reveal" aria-label="Animated Cycle Windows demonstration">
+        <div class="mission-label"><span></span>Mission Control</div>
+        <div class="mission-windows">
+          <div class="mission-card card-one"><div class="fake-toolbar"></div><div class="fake-editor"></div><small>Notes</small></div>
+          <div class="mission-card card-two"><div class="fake-toolbar"></div><div class="fake-browser"><i></i><i></i><i></i></div><small>Safari</small></div>
+          <div class="mission-card card-three"><div class="fake-toolbar"></div><div class="fake-mail"></div><small>Mail</small></div>
+        </div>
+        <div class="swipe-rail"><span class="hand-mark">•••</span><i></i><b>Swipe to browse · lift to select</b></div>
+      </div>
+      <div class="window-actions reveal">
+        <span>Left half</span><span>Right half</span><span>Quarters</span><span>Center</span><span>Maximize</span><span>Move desktop</span>
+      </div>
+    </section>
+
+    <section class="guide-section" id="guide">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Start in minutes</p>
+        <h2>From download to first gesture.</h2>
+        <p class="lede">Trackpad Control lives quietly in the menu bar. Set it up once, then let muscle memory take over.</p>
+      </div>
+
+      <div class="setup-grid">
+        <ol class="setup-steps reveal">
+          <li data-step="1">
+            <div><h3>Install the app</h3><p>Unzip the download and move <strong>trackpad_control.app</strong> into Applications.</p></div>
+          </li>
+          <li data-step="2">
+            <div><h3>Open it once</h3><p>Control-click the app, choose <strong>Open</strong>, then confirm. This is needed because the current download is unsigned.</p></div>
+          </li>
+          <li data-step="3">
+            <div><h3>Allow control</h3><p>Grant Accessibility and Automation when macOS asks. These permissions let gestures run shortcuts and manage windows.</p></div>
+          </li>
+          <li data-step="4">
+            <div><h3>Choose a gesture</h3><p>Open Settings from the menu bar, enable a starter gesture, or press <strong>+</strong> to create your own.</p></div>
+          </li>
+        </ol>
+
+        <figure class="app-shot reveal">
+          <div class="shot-glow"></div>
+          <img src="images/trackpad-control-settings.png" alt="Trackpad Control settings showing the gesture library">
+          <figcaption><span class="status-dot"></span>The gesture library keeps every path, finger count, action, and enable switch within reach.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="flow-section" id="reference">
+      <div class="section-heading centered reveal">
+        <p class="eyebrow">The everyday guide</p>
+        <h2>Make every gesture dependable.</h2>
+        <p class="lede">A few small choices make gestures feel fast and predictable.</p>
+      </div>
+
+      <div class="guide-cards">
+        <article class="guide-card reveal">
+          <span class="guide-number">01</span>
+          <h3>Pick a finger layer</h3>
+          <p>One through five fingers create separate gesture groups, so the same shape can do different things in different layers.</p>
+          <div class="finger-row" aria-label="One to five fingers"><i></i><i></i><i></i><i></i><i></i></div>
+        </article>
+        <article class="guide-card reveal">
+          <span class="guide-number">02</span>
+          <h3>Record natural samples</h3>
+          <p>Draw the gesture as you would in daily use. A few samples teach the recognizer your normal speed and shape.</p>
+          <div class="sample-stack" aria-hidden="true"><span></span><span></span><span></span></div>
+        </article>
+        <article class="guide-card reveal">
+          <span class="guide-number">03</span>
+          <h3>Keep shapes distinct</h3>
+          <p>Use clear corners and directions when two gestures share a finger count. The live overlay shows what the app saw.</p>
+          <div class="shape-pair" aria-hidden="true"><span>⌜</span><b>≠</b><span>○</span></div>
+        </article>
+        <article class="guide-card reveal">
+          <span class="guide-number">04</span>
+          <h3>Tune continuous motion</h3>
+          <p>Adjust sensitivity for the distance that feels comfortable. Higher values trigger smaller, finer steps.</p>
+          <div class="sensitivity" aria-label="Sensitivity control illustration"><span></span><i></i></div>
+        </article>
+      </div>
+
+      <div class="overlay-story reveal">
+        <div class="overlay-copy">
+          <span class="card-kicker">Live feedback</span>
+          <h3>See what your fingers are saying.</h3>
+          <p>The optional overlay draws every active finger path and confirms the recognized action. It appears on whichever desktop Space you are using.</p>
+          <ul class="check-list">
+            <li>Blue tracks follow the live gesture</li>
+            <li>A confirmation names the action</li>
+            <li>Appearance controls keep it subtle</li>
+          </ul>
+        </div>
+        <div class="overlay-visual" aria-hidden="true">
+          <div class="space-label">Desktop 3</div>
+          <svg viewBox="0 0 520 320">
+            <path class="overlay-line ol1" pathLength="1" d="M84 235 C126 147 164 205 206 119 S298 105 329 170 S396 250 448 124"/>
+            <path class="overlay-line ol2" pathLength="1" d="M101 247 C143 159 181 217 223 131 S315 117 346 182 S413 262 465 136"/>
+            <path class="overlay-line ol3" pathLength="1" d="M67 247 C109 159 147 217 189 131 S281 117 312 182 S379 262 431 136"/>
+          </svg>
+          <div class="overlay-toast"><span>✓</span><b>Mission Control</b></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="actions-section" id="actions">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Your gesture, your action</p>
+        <h2>A shortcut for almost anything.</h2>
+      </div>
+      <div class="action-list reveal">
+        <div><span class="action-symbol">A</span><b>Open any app</b><small>Jump straight to the tool you need.</small></div>
+        <div><span class="action-symbol">⌘</span><b>Run keyboard shortcuts</b><small>Make app commands feel physical.</small></div>
+        <div><span class="action-symbol">◐</span><b>Volume &amp; brightness</b><small>Use smooth, continuous movement.</small></div>
+        <div><span class="action-symbol">▣</span><b>Arrange windows</b><small>Tile, center, maximize, or move.</small></div>
+        <div><span class="action-symbol">↔</span><b>Switch desktops</b><small>Travel between Spaces by touch.</small></div>
+        <div><span class="action-symbol">◫</span><b>Cycle windows</b><small>Browse visually, then lift to choose.</small></div>
+      </div>
+    </section>
+
+    <section class="faq-section" id="faq">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Good to know</p>
+        <h2>Questions before you begin.</h2>
+      </div>
+      <div class="faq-list reveal">
+        <details open><summary>Which Macs are supported?<span>+</span></summary><p>The downloadable v1.2.2 release requires an Apple silicon Mac running macOS 26.4 or later.</p></details>
+        <details><summary>Why does macOS warn me on first launch?<span>+</span></summary><p>The current release is not signed with an Apple Developer certificate. Control-click the app, choose Open, and confirm once.</p></details>
+        <details><summary>Why are Accessibility and Automation needed?<span>+</span></summary><p>Accessibility lets Trackpad Control manage windows and send input. Automation lets it ask System Events to perform the shortcuts assigned to gestures.</p></details>
+        <details><summary>Where are my gestures stored?<span>+</span></summary><p>Your gesture library and recognition settings stay on your Mac. You can export a backup from Settings and import it later.</p></details>
+        <details><summary>Where can I report a problem?<span>+</span></summary><p>Open an issue on <a href="https://github.com/Smoep/trackpad_control/issues">GitHub</a> with the gesture type, finger count, and what you expected to happen.</p></details>
+      </div>
+    </section>
+
+    <section class="final-cta reveal">
+      <img src="assets/app-icon.png" alt="Trackpad Control app icon" width="116" height="116">
+      <p class="eyebrow">Ready when your fingers are</p>
+      <h2>Turn movement into momentum.</h2>
+      <p>Give the trackpad a vocabulary built around the way you work.</p>
+      <a class="button primary" href="https://github.com/Smoep/trackpad_control/releases/download/v1.2.2/trackpad_control-v1.2.2.zip">Download Trackpad Control</a>
+      <small>v1.2.2 · macOS 26.4+ · Apple silicon</small>
+    </section>
+  </main>
+
+  <footer>
+    <a class="brand footer-brand" href="#top"><img src="assets/app-icon.png" alt="" width="32" height="32"><span>Trackpad Control</span></a>
+    <p>Custom trackpad gestures for macOS.</p>
+    <div><a href="https://github.com/Smoep/trackpad_control">Source</a><a href="https://github.com/Smoep/trackpad_control/releases">Releases</a><a href="https://github.com/Smoep/trackpad_control/issues">Support</a></div>
+  </footer>
+</body>
+</html>

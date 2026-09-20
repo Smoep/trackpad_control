@@ -8,6 +8,8 @@ Trackpad Control is a macOS menu bar app that turns custom multi-finger trackpad
 
 It is built for power users who want gesture automation on Mac without opening full automation tools.
 
+[**Explore the visual guide →**](https://smoep.github.io/trackpad_control/)
+
 ## Download
 
 [**→ Download trackpad_control.zip from the latest release**](https://github.com/Smoep/trackpad_control/releases/latest)
