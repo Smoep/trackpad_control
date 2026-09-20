@@ -5,7 +5,7 @@ import SwiftUI
 /// Uses subtle glass-like rendering: thin feathered strokes, low opacity, soft glow.
 final class GestureOverlayWindow {
     static let shared = GestureOverlayWindow()
-    static let diagnosticBuildMarker = "OVERLAY_DESKTOP_DEBUG_20260627_1818"
+    static let diagnosticBuildMarker = "OVERLAY_WINDOW_RESET_20260920"
 
     private var window: NSWindow?
     private let overlayView = GlassOverlayView()
@@ -32,12 +32,12 @@ final class GestureOverlayWindow {
     // MARK: - Live Trace
 
     func showAnchorCandidate(progress: Double) {
-        ensureWindow()
+        let wasHidden = !isShowing
+        ensureFreshWindowForPresentation(wasHidden: wasHidden)
         overlayGeneration += 1
         hideAnimationTimer?.cancel()
         hideAnimationTimer = nil
 
-        let wasHidden = !isShowing
         isShowing = true
         isHiding = false
         lastShowTime = ProcessInfo.processInfo.systemUptime
@@ -59,12 +59,12 @@ final class GestureOverlayWindow {
     }
 
     func showTrace(paths: [[PathPoint]], fingerCount: Int) {
-        ensureWindow()
+        let wasHidden = !isShowing
+        ensureFreshWindowForPresentation(wasHidden: wasHidden)
         overlayGeneration += 1
         hideAnimationTimer?.cancel()
         hideAnimationTimer = nil
 
-        let wasHidden = !isShowing
         isShowing = true
         isHiding = false
         lastShowTime = ProcessInfo.processInfo.systemUptime
@@ -94,7 +94,7 @@ final class GestureOverlayWindow {
             overlayView.paths = []
             overlayView.fingerCount = 0
             overlayView.needsDisplay = true
-            window?.orderOut(nil)
+            dismissWindow()
             return
         }
 
@@ -131,16 +131,21 @@ final class GestureOverlayWindow {
             self.overlayView.fingerCount = 0
             self.overlayView.mode = .idle
             self.overlayView.needsDisplay = true
-            self.window?.orderOut(nil)
+            self.dismissWindow()
         }
     }
 
     // MARK: - Recognition Acknowledgment
 
     func showAcknowledgment(name: String, at point: NSPoint, intensity: Double = 0.3) {
-        ensureWindow()
+        let wasHidden = !isShowing
+        ensureFreshWindowForPresentation(wasHidden: wasHidden)
         overlayGeneration += 1
         let ackToken = overlayGeneration
+        hideAnimationTimer?.cancel()
+        hideAnimationTimer = nil
+        isShowing = true
+        isHiding = false
         logDecision("SHOW acknowledgment desktopIdx=\(WindowManager.currentSpaceIdx) name=\(name) marker=\(Self.diagnosticBuildMarker)", force: true)
         overlayView.mode = .acknowledgment
         overlayView.acknowledgmentName = name
@@ -155,20 +160,24 @@ final class GestureOverlayWindow {
         overlayView.playAcknowledgmentFade { [weak self] in
             guard let self, self.overlayGeneration == ackToken else { return }
             if self.overlayView.mode == .acknowledgment {
+                self.isShowing = false
+                self.isHiding = false
                 self.overlayView.mode = .idle
                 self.overlayView.needsDisplay = true
-                self.window?.orderOut(nil)
+                self.dismissWindow()
             }
         }
     }
 
     func showDiagnosticSelfTest(duration: TimeInterval = 3.0) {
-        ensureWindow()
+        let wasHidden = !isShowing
+        ensureFreshWindowForPresentation(wasHidden: wasHidden)
         overlayGeneration += 1
         let diagToken = overlayGeneration
         hideAnimationTimer?.cancel()
         hideAnimationTimer = nil
         isShowing = true
+        isHiding = false
         overlayView.mode = .diagnostic
         overlayView.needsDisplay = true
         logDecision("SHOW diagnostic self-test marker=\(Self.diagnosticBuildMarker) desktopIdx=\(WindowManager.currentSpaceIdx)", force: true)
@@ -180,9 +189,10 @@ final class GestureOverlayWindow {
             guard let self, self.overlayGeneration == diagToken else { return }
             self.logDecision("HIDE diagnostic self-test marker=\(Self.diagnosticBuildMarker) desktopIdx=\(WindowManager.currentSpaceIdx)", force: true)
             self.isShowing = false
+            self.isHiding = false
             self.overlayView.mode = .idle
             self.overlayView.needsDisplay = true
-            self.window?.orderOut(nil)
+            self.dismissWindow()
         }
         hideAnimationTimer = work
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
@@ -200,8 +210,26 @@ final class GestureOverlayWindow {
 
     // MARK: - Window
 
+    /// A hidden overlay gets a new window for its next presentation. A long-lived
+    /// borderless window can keep a stale Spaces assignment after it has been ordered
+    /// out, and its layer can remain at the terminal opacity of an interrupted fade.
+    /// Recreating only between presentations keeps frame-by-frame trace updates cheap
+    /// while making the new window belong to the Space that is active now.
+    private func ensureFreshWindowForPresentation(wasHidden: Bool) {
+        if wasHidden {
+            dismissWindow()
+        }
+        ensureWindow()
+    }
+
     private func ensureWindow() {
         if window == nil { createWindow() }
+    }
+
+    private func dismissWindow() {
+        window?.orderOut(nil)
+        window?.contentView = nil
+        window = nil
     }
 
     private func createWindow() {
@@ -225,6 +253,7 @@ final class GestureOverlayWindow {
         overlayView.enableLayerBacking()
 
         self.window = w
+        WindowManager.attachOwnWindowToActiveSpace(w.windowNumber)
     }
 }
 

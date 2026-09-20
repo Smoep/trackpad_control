@@ -5,8 +5,12 @@ struct trackpad_controlApp: App {
     @State private var appState = AppState.shared
 
     var body: some Scene {
-        MenuBarExtra("Trackpad Control", systemImage: appState.recognitionSettings.isTracking ? "hand.point.up.braille.fill" : "hand.point.up.braille") {
+        MenuBarExtra {
             MenuBarContentView()
+        } label: {
+            Image(appState.recognitionSettings.isTracking ? "MenuBarGlyphActive" : "MenuBarGlyph")
+                .renderingMode(.template)
+                .accessibilityLabel("Trackpad Control")
         }
         .menuBarExtraStyle(.menu)
     }

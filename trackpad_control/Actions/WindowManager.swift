@@ -186,6 +186,44 @@ enum WindowManager {
         return nil
     }
 
+    /// Explicitly adds one of this app's windows to the currently active managed
+    /// Space. `NSWindow.CollectionBehavior.canJoinAllSpaces` is kept as the public
+    /// API fallback, but Tahoe can retain a stale Space assignment after a hidden
+    /// borderless window is reused. Unlike foreign app windows, adding our own
+    /// overlay window through SkyLight is reliable and does not require a drag.
+    static func attachOwnWindowToActiveSpace(_ windowNumber: Int) {
+        let conn = SLSMainConnectionID_dyn?() ?? CGSMainConnectionID()
+        let rawSpaces = CGSCopyManagedDisplaySpaces(conn) as NSArray
+
+        var currentSpaceID: UInt64?
+        for case let display as NSDictionary in rawSpaces {
+            guard let current = display["Current Space"] as? NSDictionary else { continue }
+            currentSpaceID = (current["ManagedSpaceID"] as? NSNumber)?.uint64Value
+                ?? (current["id64"] as? NSNumber)?.uint64Value
+            if currentSpaceID != nil { break }
+        }
+
+        guard let currentSpaceID, let addWindows = SLSAddWindowsToSpaces_dyn else {
+            mtdLog("[OVERLAY] SPACE-ATTACH window=\(windowNumber) available=false")
+            return
+        }
+
+        let windowIDs = [NSNumber(value: windowNumber)] as NSArray
+        let spaceIDs = [NSNumber(value: currentSpaceID)] as NSArray
+        addWindows(conn, windowIDs, spaceIDs)
+
+        let attachedSpaces: [UInt64]
+        if let rawAttachedSpaces = SLSCopySpacesForWindows_dyn?(conn, 0x7, windowIDs) {
+            attachedSpaces = (rawAttachedSpaces as NSArray).compactMap {
+                ($0 as? NSNumber)?.uint64Value
+            }
+        } else {
+            attachedSpaces = []
+        }
+        let attached = attachedSpaces.contains(currentSpaceID)
+        mtdLog("[OVERLAY] SPACE-ATTACH window=\(windowNumber) currentSpace=\(currentSpaceID) attached=\(attached) spaces=\(attachedSpaces)")
+    }
+
     /// Call once at app launch to subscribe to space-change notifications so we
     /// can reset our tracked index when the user switches desktops outside our
     /// gestures (Mission Control, swipe, Ctrl+Arrow keyboard shortcut, etc.).
@@ -252,6 +290,7 @@ enum WindowManager {
         let windowID: CGWindowID
         let pid: pid_t
         let title: String
+        let bounds: CGRect
     }
 
     private static var windowCycleCandidates: [WindowCycleCandidate] = []
@@ -262,22 +301,64 @@ enum WindowManager {
     // MARK: - Mission Control overview (Cycle Windows)
 
     nonisolated(unsafe) private static var missionControlActive = false
+    private static var missionControlReadyAt: TimeInterval = 0
+    private static var missionControlSavedCursor: CGPoint?
+    private static var missionControlStartingWindowID: CGWindowID?
+    private static var missionControlSelectionPoint: CGPoint?
+    private static var missionControlSelectionWindowID: CGWindowID?
+    private static var missionControlDeferredDirection: Bool?
+    private static var missionControlDeferredStepScheduled = false
+    private static let missionControlSettleDuration: TimeInterval = 0.45
 
     /// Open Mission Control (all-windows overview). Idempotent.
     static func enterMissionControl() {
         DispatchQueue.main.async {
             guard !missionControlActive else { return }
             missionControlActive = true
+            missionControlReadyAt = ProcessInfo.processInfo.systemUptime + missionControlSettleDuration
+            missionControlSavedCursor = CGEvent(source: nil)?.location
+            missionControlStartingWindowID = focusedWindowID()
+            missionControlSelectionPoint = nil
+            missionControlSelectionWindowID = nil
+            missionControlDeferredDirection = nil
+            missionControlDeferredStepScheduled = false
+            windowCycleCandidates.removeAll()
             CoreDockSendNotification_dyn?("com.apple.expose.awake" as CFString, 0)
+            mtdLog("[WINCYCLE] overview enter settle=\(String(format: "%.2f", missionControlSettleDuration))")
         }
     }
 
-    /// Close Mission Control, landing on the currently-focused window. Idempotent.
+    /// Select the hovered Mission Control thumbnail and restore the user's pointer.
+    /// Falls back to toggling Mission Control closed if no thumbnail was selected.
     static func exitMissionControl() {
         DispatchQueue.main.async {
             guard missionControlActive else { return }
             missionControlActive = false
-            CoreDockSendNotification_dyn?("com.apple.expose.awake" as CFString, 0)
+
+            let restorePoint = missionControlSavedCursor
+            if let selectionPoint = missionControlSelectionPoint,
+               let source = CGEventSource(stateID: .combinedSessionState) {
+                postLeftMouseEvent(type: .leftMouseDown, at: selectionPoint, source: source)
+                postLeftMouseEvent(type: .leftMouseUp, at: selectionPoint, source: source)
+                mtdLog("[WINCYCLE] select wid=\(missionControlSelectionWindowID ?? 0) point=\(selectionPoint)")
+            } else {
+                CoreDockSendNotification_dyn?("com.apple.expose.awake" as CFString, 0)
+                mtdLog("[WINCYCLE] overview exit fallback=noSelection")
+            }
+
+            windowCycleCandidates.removeAll()
+            missionControlStartingWindowID = nil
+            missionControlSelectionPoint = nil
+            missionControlSelectionWindowID = nil
+            missionControlDeferredDirection = nil
+            missionControlDeferredStepScheduled = false
+            missionControlSavedCursor = nil
+
+            if let restorePoint {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    CGWarpMouseCursorPosition(restorePoint)
+                }
+            }
         }
     }
 
@@ -289,7 +370,25 @@ enum WindowManager {
 
     private static func cycleVisibleWindowsOnMain(positive: Bool) {
         let now = ProcessInfo.processInfo.systemUptime
-        let isNewSession = windowCycleCandidates.isEmpty || (now - windowCycleTime) > windowCycleResetInterval
+        if missionControlActive && now < missionControlReadyAt {
+            let delay = missionControlReadyAt - now
+            missionControlDeferredDirection = positive
+            if !missionControlDeferredStepScheduled {
+                missionControlDeferredStepScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    missionControlDeferredStepScheduled = false
+                    guard missionControlActive,
+                          let deferredDirection = missionControlDeferredDirection else { return }
+                    missionControlDeferredDirection = nil
+                    cycleVisibleWindowsOnMain(positive: deferredDirection)
+                }
+            }
+            mtdLog("[WINCYCLE] defer/coalesce dir=\(positive ? "positive" : "negative") remaining=\(String(format: "%.3f", delay))")
+            return
+        }
+
+        let isNewSession = windowCycleCandidates.isEmpty
+            || (!missionControlActive && (now - windowCycleTime) > windowCycleResetInterval)
 
         if isNewSession {
             let visibleCandidates = visibleWindowCycleCandidates()
@@ -301,7 +400,7 @@ enum WindowManager {
 
             guard !windowCycleCandidates.isEmpty else { return }
 
-            if let focusedID = focusedWindowID(),
+            if let focusedID = missionControlStartingWindowID ?? focusedWindowID(),
                let focusedIndex = windowCycleCandidates.firstIndex(where: { $0.windowID == focusedID }) {
                 windowCycleIndex = focusedIndex
             } else {
@@ -314,9 +413,9 @@ enum WindowManager {
         for _ in 0..<windowCycleCandidates.count {
             windowCycleIndex = wrappedWindowCycleIndex(windowCycleIndex + (positive ? 1 : -1))
             let candidate = windowCycleCandidates[windowCycleIndex]
-            if focusWindow(candidate) {
+            if hoverMissionControlWindow(candidate) {
                 windowCycleTime = now
-                mtdLog("[WINCYCLE] focused pid=\(candidate.pid) wid=\(candidate.windowID) title=\(candidate.title)")
+                mtdLog("[WINCYCLE] hovered pid=\(candidate.pid) wid=\(candidate.windowID) title=\(candidate.title)")
                 return
             }
         }
@@ -340,7 +439,7 @@ enum WindowManager {
         }
 
         var seen = Set<CGWindowID>()
-        return infoList.compactMap { info -> WindowCycleCandidate? in
+        let candidates = infoList.compactMap { info -> WindowCycleCandidate? in
             guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
                   let pidNumber = info[kCGWindowOwnerPID as String] as? NSNumber,
                   let windowNumber = info[kCGWindowNumber as String] as? NSNumber,
@@ -363,7 +462,23 @@ enum WindowManager {
             let title = info[kCGWindowName as String] as? String ?? owner
             if owner == "Dock" || owner == "Window Server" { return nil }
 
-            return WindowCycleCandidate(windowID: windowID, pid: pid_t(pidNumber.int32Value), title: title)
+            return WindowCycleCandidate(
+                windowID: windowID,
+                pid: pid_t(pidNumber.int32Value),
+                title: title,
+                bounds: bounds
+            )
+        }
+
+        // CGWindowList is ordered by window stacking, while Mission Control lays
+        // thumbnails out spatially. Use the visual horizontal order so right and
+        // left swipes move in the corresponding on-screen direction.
+        return candidates.sorted { lhs, rhs in
+            let xDifference = lhs.bounds.midX - rhs.bounds.midX
+            if abs(xDifference) > 1 {
+                return xDifference < 0
+            }
+            return lhs.bounds.midY < rhs.bounds.midY
         }
     }
 
@@ -378,27 +493,33 @@ enum WindowManager {
         return windowID
     }
 
-    private static func focusWindow(_ candidate: WindowCycleCandidate) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: candidate.pid), !app.isTerminated else { return false }
-        let appElement = AXUIElementCreateApplication(candidate.pid)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement] else { return false }
+    private static func hoverMissionControlWindow(_ candidate: WindowCycleCandidate) -> Bool {
+        guard missionControlActive else { return false }
 
-        for window in windows {
-            var windowID = CGWindowID(0)
-            guard _AXUIElementGetWindow(window, &windowID) == .success, windowID == candidate.windowID else { continue }
-            app.activate(options: .activateIgnoringOtherApps)
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        // While Mission Control is open, CGWindowList reports the composited
+        // thumbnail bounds rather than the window's normal desktop bounds. Moving
+        // the pointer to that center asks Dock to produce its native blue hover
+        // border without activating/raising the real window underneath (which
+        // causes the overview to rearrange on macOS 26.5+).
+        let currentCandidate = visibleWindowCycleCandidates().first {
+            $0.windowID == candidate.windowID
+        } ?? candidate
+        let point = CGPoint(x: currentCandidate.bounds.midX, y: currentCandidate.bounds.midY)
+        guard point.x.isFinite, point.y.isFinite else { return false }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                app.activate(options: .activateIgnoringOtherApps)
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            }
-            return true
+        CGWarpMouseCursorPosition(point)
+        if let source = CGEventSource(stateID: .combinedSessionState),
+           let move = CGEvent(
+            mouseEventSource: source,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+           ) {
+            move.post(tap: .cghidEventTap)
         }
-
-        return false
+        missionControlSelectionPoint = point
+        missionControlSelectionWindowID = currentCandidate.windowID
+        return true
     }
 
     static func cycleHorizontalTiling(positive: Bool) {

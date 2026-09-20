@@ -81,7 +81,5 @@ jobs:
             gh release create "$TAG" \
               "$GITHUB_WORKSPACE/trackpad_control-$TAG.zip" \
               --title "Trackpad Control $TAG" \
-              --notes "Requires macOS 26.4 or newer (Apple Silicon).
-
-              **First launch:** right-click the app -> Open -> Open (app is unsigned)."
+              --notes-file "$GITHUB_WORKSPACE/docs/releases/$TAG.md"
           fi

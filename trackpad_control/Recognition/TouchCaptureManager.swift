@@ -743,8 +743,14 @@ final class TouchCaptureManager {
                                     // turn <= 1.3; circles have maxOff > 0.10 or turn > 2.0 by the time the
                                     // net-axis test passes. Replayed in scripts/lock_gate_experiment.py:
                                     // circles 0/10 -> 9/10, Probe CW 7/7 unchanged, 0 live strokes change.
-                                    accepted = axisRatio >= 1.35 && offAxis <= 0.35 && maxOffAxis <= 0.38
-                                        && maxOffAxis <= 0.10 && lockTurn <= 2.0
+                                    // Tiny per-frame sensor jitter can produce a large cumulative
+                                    // turn even when the path stays in a very narrow horizontal
+                                    // band. Treat that low off-axis excursion as independently
+                                    // strong evidence of a straight swipe.
+                                    let isVisuallyStraight = maxOffAxis <= 0.03
+                                    accepted = axisRatio >= 1.35 && offAxis <= 0.35
+                                        && maxOffAxis <= 0.10
+                                        && (isVisuallyStraight || lockTurn <= 2.0)
                                 } else {
                                     accepted = axisRatio >= 2.0 && offAxis <= 0.10 && maxOffAxis <= 0.12
                                 }
@@ -860,7 +866,11 @@ final class TouchCaptureManager {
                             ztLog("STEP-RATE-LIMIT: control=\(contGesture.continuousControl.rawValue) elapsed=\(String(format:"%.3f", elapsed)) min=\(String(format:"%.3f", minInterval)) acc=\(String(format:"%.3f", continuousAccumulator))")
                             lastNavigationRateLimitLogTime = now
                         }
-                        continuousAccumulator = 0
+                        // Keep the accumulated threshold crossing. The next touch
+                        // frame will apply one step as soon as the cooldown expires;
+                        // clearing it here made identical swipes respond differently
+                        // depending on whether movement happened just before or just
+                        // after the timer boundary.
                     }
                     break
                 }
@@ -1973,7 +1983,7 @@ final class TouchCaptureManager {
     private func continuousMinInterval(for control: ContinuousControl) -> TimeInterval {
         switch control {
         case .cycleWindows:
-            0.32
+            0.18
         case .scrollDesktops:
             0.18
         case .windowHorizontalTiling:

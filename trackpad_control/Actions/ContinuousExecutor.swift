@@ -20,8 +20,9 @@ enum ContinuousExecutor {
             let script = positive ? scrollRightScript : scrollLeftScript
             script.executeAndReturnError(nil)
         case .cycleWindows:
-            // Reversed so the scroll direction matches the other navigation gestures.
-            WindowManager.cycleVisibleWindows(positive: !positive)
+            // Mission Control exposes the selected thumbnail visually, so preserve
+            // the physical swipe direction: right advances and left goes back.
+            WindowManager.cycleVisibleWindows(positive: positive)
         case .windowHorizontalTiling:
             WindowManager.cycleHorizontalTiling(positive: positive)
         case .custom:
